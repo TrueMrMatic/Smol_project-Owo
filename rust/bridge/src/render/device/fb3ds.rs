@@ -121,8 +121,11 @@ impl FbView {
                     let sg = src.rgba[si + 1];
                     let sb = src.rgba[si + 2];
                     let sa = src.rgba[si + 3];
-
-                    if sa == 255 {
+                    if src.is_opaque {
+                        *p.add(0) = sb;
+                        *p.add(1) = sg;
+                        *p.add(2) = sr;
+                    } else if sa == 255 {
                         *p.add(0) = sb;
                         *p.add(1) = sg;
                         *p.add(2) = sr;
@@ -207,56 +210,62 @@ impl FbView {
         maxx = maxx.min(disp_w - 1);
         if maxx < minx { return; }
 
-        // Edge list
-        let vx = [ax, bx, cx];
-        let vy = [ay, by, cy];
+        #[derive(Clone, Copy)]
+        struct Edge {
+            x_start: i32,
+            x_end: i32,
+            y_fp: i64,
+            step: i64,
+        }
+
+        let mut edges: [Option<Edge>; 3] = [None, None, None];
+        let verts = [(ax, ay), (bx, by), (cx, cy)];
+
+        for e in 0..3 {
+            let (x0, y0) = verts[e];
+            let (x1, y1) = verts[(e + 1) % 3];
+            if x0 == x1 {
+                continue;
+            }
+            let (sx, sy, ex, ey) = if x0 < x1 { (x0, y0, x1, y1) } else { (x1, y1, x0, y0) };
+            let mut x_start = sx.max(minx);
+            let x_end = ex.min(maxx + 1);
+            if x_end <= x_start {
+                continue;
+            }
+            let dx = (ex - sx) as i64;
+            let dy = (ey - sy) as i64;
+            let step = (dy << 16) / dx;
+            let mut y_fp = (sy as i64) << 16;
+            let advance = (x_start - sx) as i64;
+            y_fp += step * advance;
+            let slot = edges.iter_mut().find(|item| item.is_none());
+            if let Some(target) = slot {
+                *target = Some(Edge { x_start, x_end, y_fp, step });
+            }
+        }
 
         for x in minx..=maxx {
-            // Track min/max intersection y in 16.16 fixed-point.
             let mut y_min_fp: i64 = i64::MAX;
             let mut y_max_fp: i64 = i64::MIN;
             let mut hits: i32 = 0;
 
-            for e in 0..3 {
-                let j = (e + 1) % 3;
-                let x0 = vx[e];
-                let y0 = vy[e];
-                let x1 = vx[j];
-                let y1 = vy[j];
-
-                if x0 == x1 {
-                    // Vertical edge: if we are on the same x, add both endpoints.
-                    if x == x0 {
-                        let y0fp = (y0 as i64) << 16;
-                        let y1fp = (y1 as i64) << 16;
-                        y_min_fp = y_min_fp.min(y0fp.min(y1fp));
-                        y_max_fp = y_max_fp.max(y0fp.max(y1fp));
-                        hits += 2;
-                    }
+            for edge in edges.iter_mut().flatten() {
+                if x < edge.x_start || x >= edge.x_end {
                     continue;
                 }
-
-                let ex0 = x0.min(x1);
-                let ex1 = x0.max(x1);
-
-                // Half-open rule in X to avoid double hits on shared edges.
-                if x < ex0 || x >= ex1 { continue; }
-
-                let dx = (x1 - x0) as i64;
-                let dy = (y1 - y0) as i64;
-                let t_num = (x - x0) as i64;
-
-                let y_fp = ((y0 as i64) << 16) + (t_num * dy << 16) / dx;
+                let y_fp = edge.y_fp;
                 y_min_fp = y_min_fp.min(y_fp);
                 y_max_fp = y_max_fp.max(y_fp);
+                edge.y_fp = edge.y_fp.saturating_add(edge.step);
                 hits += 1;
             }
 
-            if hits < 2 { continue; }
-
-            // Convert to integer span [y0, y1_excl)
-            let y0 = ((y_min_fp + 0xFFFF) >> 16) as i32; // ceil(min)
-            let y1_excl = ((y_max_fp >> 16) as i32) + 1; // floor(max)+1
+            if hits < 2 {
+                continue;
+            }
+            let y0 = ((y_min_fp + 0xFFFF) >> 16) as i32;
+            let y1_excl = ((y_max_fp >> 16) as i32) + 1;
             self.fill_col_span(x, y0, y1_excl, r, g, bcol);
         }
     }
