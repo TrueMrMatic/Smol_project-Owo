@@ -1,5 +1,0 @@
-build_id=PATCH_003_UI_Y_HARD_FIX
-base_id=PATCH_002_UI_SNAPSHOT_SAFETY
-start_ms=1768493374490
-swf_path=sdmc:/flash/file1 (the-worlds-hardest-game).swf
-run_dir=sdmc:/flash/_runs/PATCH_003_UI_Y_HARD_FIX/file1 (the-worlds-hardest-game).swf
