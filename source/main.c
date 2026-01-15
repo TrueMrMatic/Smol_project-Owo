@@ -223,9 +223,9 @@ static void hud_draw(void* ctx) {
             status_rest = sp + 1;
         } else {
             // Entire status is a warning token.
-            strncpy(warn, status + 1, sizeof(warn) - 1);
-            warn[sizeof(warn) - 1] = 0;
-            status_rest = "";
+            size_t n = strnlen(status + 1, sizeof(warn) - 1);
+			      memcpy(warn, status + 1, n);
+			      warn[n] = '\0';
         }
     }
 
