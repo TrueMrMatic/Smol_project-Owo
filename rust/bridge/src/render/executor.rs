@@ -1,12 +1,23 @@
 use crate::render::device::RenderDevice;
+#[cfg(debug_assertions)]
+use crate::render::device::fb3ds;
 use crate::render::frame::{FramePacket, Matrix2D, RectI, RenderCmd, TexVertex};
 use crate::render::SharedCaches;
+use crate::render::cache::shapes::Vertex2;
 use crate::runlog;
 use crate::util::config;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub struct CommandExecutor;
+
+const DEBUG_AFFINE_VERTS: [Vertex2; 4] = [
+    Vertex2 { x: 0, y: 0 },
+    Vertex2 { x: 40, y: 0 },
+    Vertex2 { x: 40, y: 20 },
+    Vertex2 { x: 0, y: 20 },
+];
+const DEBUG_AFFINE_INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
 static MESH_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static TEXTURE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -237,6 +248,13 @@ impl CommandExecutor {
                 RenderCmd::DrawTextSolidFill { shape_key, fill_idx, transform, color_key, wireframe } => {
                     TEXT_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
                     let (cr, cg, cb) = color_from_key(*color_key);
+                    // Early reject by transformed bounds (very common win for offscreen text).
+                    if let Some(b) = shapes.get_bounds(*shape_key) {
+                        let tr = rect_aabb_transformed(b, *transform);
+                        if !rect_intersects_surface(tr, sw, sh) {
+                            continue;
+                        }
+                    }
                     let int_translation = is_integer_translation(*transform);
                     let mut used_fallback = false;
                     let mut missing_mesh = false;
@@ -290,6 +308,13 @@ impl CommandExecutor {
                 }
                 RenderCmd::DrawShapeStroke { shape_key, stroke_idx, transform, r, g, b, wireframe } => {
                     STROKE_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
+                    // Early reject by transformed bounds (very common win for offscreen strokes).
+                    if let Some(b) = shapes.get_bounds(*shape_key) {
+                        let tr = rect_aabb_transformed(b, *transform);
+                        if !rect_intersects_surface(tr, sw, sh) {
+                            continue;
+                        }
+                    }
                     let int_translation = is_integer_translation(*transform);
                     let mut used_fallback = false;
                     let mut missing_mesh = false;
@@ -409,6 +434,10 @@ impl CommandExecutor {
                         device.draw_tris_textured(&verts, &indices, src, *color_transform);
                     }
                 }
+                RenderCmd::DebugAffineRect { transform, r, g, b } => {
+                    device.fill_tris_solid_affine(&DEBUG_AFFINE_VERTS, &DEBUG_AFFINE_INDICES, *transform, *r, *g, *b);
+                    device.draw_tris_wireframe_affine(&DEBUG_AFFINE_VERTS, &DEBUG_AFFINE_INDICES, *transform, 255, 255, 255);
+                }
                 RenderCmd::DebugLoadingIndicator => {
                     // More intuitive "loading" indicator without text:
                     // a bordered bar with an animated highlight moving left→right.
@@ -480,6 +509,16 @@ impl CommandExecutor {
                 stroke_fallbacks,
                 stroke_draws
             ));
+            #[cfg(debug_assertions)]
+            {
+                let (translation, axis_aligned, general) = fb3ds::take_affine_path_counts();
+                runlog::log_line(&format!(
+                    "affine_paths translation={} axis_aligned={} general={}",
+                    translation,
+                    axis_aligned,
+                    general
+                ));
+            }
         }
     }
 }

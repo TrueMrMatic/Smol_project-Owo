@@ -6,15 +6,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
+#[cfg(feature = "navigator")]
 use async_channel::{Receiver, Sender};
 use indexmap::IndexMap;
 use url::Url;
 
 use ruffle_core::backend::log::LogBackend;
+#[cfg(feature = "navigator")]
 use ruffle_core::backend::navigator::{NavigatorBackend, NavigationMethod, Request, SuccessResponse, ErrorResponse};
+#[cfg(feature = "storage")]
 use ruffle_core::backend::storage::StorageBackend;
 use ruffle_core::backend::ui::{UiBackend, MouseCursor, FileFilter, FileDialogResult, FontDefinition, LanguageIdentifier, DialogLoaderError};
 use ruffle_core::font::FontQuery;
+#[cfg(feature = "navigator")]
 use ruffle_core::socket::{SocketAction, SocketHandle};
 use ruffle_core::Color;
 
@@ -144,6 +148,7 @@ fn bitmap_to_surface(bitmap: Bitmap) -> BitmapSurface {
     BitmapSurface { width, height, rgba, is_opaque }
 }
 
+#[cfg(feature = "async_tasks")]
 type BoxedFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
 #[derive(Default, Clone)]
@@ -170,6 +175,7 @@ struct SharedState {
     diagnostics: Diagnostics,
     wireframe_once: bool,
     wireframe_hold: bool,
+    debug_affine_overlay: bool,
 }
 
 impl SharedState {
@@ -182,12 +188,14 @@ impl SharedState {
             diagnostics: Diagnostics::default(),
             wireframe_once: false,
             wireframe_hold: false,
+            debug_affine_overlay: false,
         }
     }
 }
 
 #[derive(Clone)]
 pub struct ThreeDSBackend {
+    #[cfg(feature = "async_tasks")]
     tasks: Arc<Mutex<Vec<BoxedFuture>>>,
     shared: Arc<Mutex<SharedState>>,
     next_shape_id: Arc<AtomicU32>,
@@ -198,6 +206,7 @@ pub struct ThreeDSBackend {
 impl ThreeDSBackend {
     pub fn new(caches: SharedCaches) -> Self {
         Self {
+            #[cfg(feature = "async_tasks")]
             tasks: Arc::new(Mutex::new(Vec::new())),
             shared: Arc::new(Mutex::new(SharedState::new())),
             next_shape_id: Arc::new(AtomicU32::new(1)),
@@ -207,11 +216,14 @@ impl ThreeDSBackend {
     }
 
     pub fn poll_tasks(&self) {
+        #[cfg(feature = "async_tasks")]
+        {
         let waker = unsafe { Waker::from_raw(dummy_waker()) };
         let mut cx = Context::from_waker(&waker);
 
         let mut tasks = self.tasks.lock().unwrap();
         tasks.retain_mut(|fut| fut.as_mut().poll(&mut cx) == Poll::Pending);
+        }
     }
 
     pub fn mark_movie_loaded(&self, swf_version: u8) {
@@ -260,6 +272,17 @@ impl ThreeDSBackend {
     pub fn set_wireframe_hold(&self, enabled: bool) {
         let mut s = self.shared.lock().unwrap();
         s.wireframe_hold = enabled;
+    }
+
+    pub fn toggle_debug_affine_overlay(&self) -> bool {
+        let mut s = self.shared.lock().unwrap();
+        s.debug_affine_overlay = !s.debug_affine_overlay;
+        s.debug_affine_overlay
+    }
+
+    pub fn debug_affine_overlay_enabled(&self) -> bool {
+        let s = self.shared.lock().unwrap();
+        s.debug_affine_overlay
     }
 
 
@@ -896,6 +919,7 @@ impl RenderBackend for ThreeDSBackend {
 }
 
 
+#[cfg(feature = "navigator")]
 impl NavigatorBackend for ThreeDSBackend {
     fn navigate_to_url(&self, _url: &str, _target: &str, _vars: Option<(NavigationMethod, IndexMap<String, String>)>) {}
 
@@ -913,17 +937,31 @@ impl NavigatorBackend for ThreeDSBackend {
     }
 
     fn spawn_future(&mut self, future: Pin<Box<dyn Future<Output = Result<(), DialogLoaderError>>>>) {
+        #[cfg(feature = "async_tasks")]
+        {
         let mut tasks = self.tasks.lock().unwrap();
         tasks.push(Box::pin(async move {
             let _ = future.await;
         }));
+        }
+        #[cfg(not(feature = "async_tasks"))]
+        {
+            let _ = future;
+            runlog::warn_line("navigator spawn_future ignored (async_tasks disabled)");
+        }
     }
 
     fn pre_process_url(&self, url: Url) -> Url { url }
 
-    fn connect_socket(&mut self, _host: String, _port: u16, _timeout: Duration, _handle: SocketHandle, _receiver: Receiver<Vec<u8>>, _sender: Sender<SocketAction>) {}
+    fn connect_socket(&mut self, _host: String, _port: u16, _timeout: Duration, _handle: SocketHandle, _receiver: Receiver<Vec<u8>>, _sender: Sender<SocketAction>) {
+        #[cfg(not(feature = "sockets"))]
+        {
+            runlog::warn_line("navigator connect_socket ignored (sockets disabled)");
+        }
+    }
 }
 
+#[cfg(feature = "storage")]
 impl StorageBackend for ThreeDSBackend {
     fn get(&self, _key: &str) -> Option<Vec<u8>> { None }
     fn put(&mut self, _key: &str, _value: &[u8]) -> bool { false }

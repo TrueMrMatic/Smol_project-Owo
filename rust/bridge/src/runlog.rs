@@ -48,6 +48,8 @@ struct RunLog {
     last_stage: String,
     last_stage_frame: u64,
     last_stage_flush_ms: u64,
+    stage_pending: bool,
+    stage_force: bool,
 
     // deferred status snapshots to avoid blocking input/UI
     status_q: VecDeque<String>,
@@ -133,6 +135,8 @@ pub fn init_for_swf(root_path: &str) {
         last_stage: "init".to_string(),
         last_stage_frame: 0,
         last_stage_flush_ms: 0,
+        stage_pending: false,
+        stage_force: false,
         status_q: VecDeque::new(),
         last_status_flush_ms: 0,
         console_q: VecDeque::new(),
@@ -267,8 +271,9 @@ pub fn stage(stage: &str, frame: u64) {
             rl.last_stage = stage.to_string();
             rl.last_stage_frame = frame;
             // Only force stage flush if we're entering a potentially-heavy phase.
-            let force = stage.contains("tess") || stage.contains("earcut") || stage.contains("register_shape");
-            maybe_flush_stage(rl, force);
+            let force = stage.contains("tess") || stage.contains("earcut");
+            rl.stage_pending = true;
+            rl.stage_force = rl.stage_force || force;
             // Also rate-limited boottrace flush when entering heavy work.
             if force {
                 maybe_flush(rl, true);
@@ -295,26 +300,37 @@ pub fn status_snapshot(text: &str) {
 
 /// Flush deferred status snapshots without blocking input/UI.
 pub fn tick() {
+    let mut stage_write: Option<(String, String)> = None;
     if let Some(lock) = RUNLOG.get() {
         if let Ok(mut guard) = lock.lock() {
             let Some(rl) = guard.as_mut() else {
                 return;
             };
             let now = now_ms();
-            if rl.status_q.is_empty() {
-                return;
+            if rl.stage_pending {
+                let due = now.saturating_sub(rl.last_stage_flush_ms) >= STAGE_FLUSH_MS;
+                if due || rl.stage_force {
+                    let data = format!("frame={} stage={}\n", rl.last_stage_frame, rl.last_stage);
+                    stage_write = Some((rl.last_stage_path.clone(), data));
+                    rl.last_stage_flush_ms = now;
+                    rl.stage_pending = false;
+                    rl.stage_force = false;
+                }
             }
-            if now.saturating_sub(rl.last_status_flush_ms) < STATUS_FLUSH_MS {
-                return;
-            }
-            if let Some(text) = rl.status_q.pop_front() {
-                rl.seq = rl.seq.wrapping_add(1);
-                let line = format!("[{:06}] {}\n", rl.seq, text);
-                let _ = rl.status.write_all(line.as_bytes());
-                let _ = rl.status.flush();
-                rl.last_status_flush_ms = now;
+
+            if !rl.status_q.is_empty() && now.saturating_sub(rl.last_status_flush_ms) >= STATUS_FLUSH_MS {
+                if let Some(text) = rl.status_q.pop_front() {
+                    rl.seq = rl.seq.wrapping_add(1);
+                    let line = format!("[{:06}] {}\n", rl.seq, text);
+                    let _ = rl.status.write_all(line.as_bytes());
+                    let _ = rl.status.flush();
+                    rl.last_status_flush_ms = now;
+                }
             }
         }
+    }
+    if let Some((path, data)) = stage_write {
+        write_all_unbuffered(&path, &data);
     }
 }
 

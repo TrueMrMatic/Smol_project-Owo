@@ -188,6 +188,14 @@ pub enum RenderCmd {
     /// Visual cue until we see real draw commands.
     DebugLoadingIndicator,
 
+    /// Developer overlay: draw a known affine-transformed rectangle mesh.
+    DebugAffineRect {
+        transform: Matrix2D,
+        r: u8,
+        g: u8,
+        b: u8,
+    },
+
 }
 
 fn approx_eq_f32(a: f32, b: f32) -> bool {

@@ -3,6 +3,50 @@ use crate::render::frame::{ClearColor, ColorTransform, Matrix2D, RectI, TexVerte
 use crate::render::cache::bitmaps::BitmapSurface;
 use crate::render::cache::shapes::Vertex2;
 
+#[cfg(debug_assertions)]
+use core::sync::atomic::{AtomicU32, Ordering};
+
+const AFFINE_FP_SHIFT: i64 = 16;
+const AFFINE_FP_HALF: i64 = 1 << (AFFINE_FP_SHIFT - 1);
+
+#[inline]
+fn affine_fixed_from_f32(value: f32) -> i64 {
+    (value * (1i64 << AFFINE_FP_SHIFT) as f32).round() as i64
+}
+
+#[inline]
+fn affine_fixed_round(value: i64) -> i32 {
+    let bias = if value >= 0 { AFFINE_FP_HALF } else { -AFFINE_FP_HALF };
+    ((value + bias) >> AFFINE_FP_SHIFT) as i32
+}
+
+#[cfg(debug_assertions)]
+static AFFINE_TRANSLATION_COUNT: AtomicU32 = AtomicU32::new(0);
+#[cfg(debug_assertions)]
+static AFFINE_AXIS_ALIGNED_COUNT: AtomicU32 = AtomicU32::new(0);
+#[cfg(debug_assertions)]
+static AFFINE_GENERAL_COUNT: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(debug_assertions)]
+fn record_affine_path(is_translation: bool, is_axis_aligned: bool) {
+    if is_translation {
+        AFFINE_TRANSLATION_COUNT.fetch_add(1, Ordering::Relaxed);
+    } else if is_axis_aligned {
+        AFFINE_AXIS_ALIGNED_COUNT.fetch_add(1, Ordering::Relaxed);
+    } else {
+        AFFINE_GENERAL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(debug_assertions)]
+pub fn take_affine_path_counts() -> (u32, u32, u32) {
+    (
+        AFFINE_TRANSLATION_COUNT.swap(0, Ordering::Relaxed),
+        AFFINE_AXIS_ALIGNED_COUNT.swap(0, Ordering::Relaxed),
+        AFFINE_GENERAL_COUNT.swap(0, Ordering::Relaxed),
+    )
+}
+
 extern "C" {
     fn gfxGetFramebuffer(screen: i32, side: i32, width: *mut u16, height: *mut u16) -> *mut u8;
 }
@@ -436,6 +480,8 @@ impl FbView {
 
     unsafe fn fill_tris_solid_affine(&self, verts: &[Vertex2], indices: &[u16], transform: Matrix2D, r: u8, g: u8, b: u8) {
         if transform.is_translation() {
+            #[cfg(debug_assertions)]
+            record_affine_path(true, false);
             let tx = transform.tx.round() as i32;
             let ty = transform.ty.round() as i32;
             self.fill_tris_solid(verts, indices, tx, ty, r, g, b);
@@ -443,12 +489,15 @@ impl FbView {
         }
 
         let axis_aligned = transform.is_axis_aligned();
-        let a = transform.a;
-        let b0 = transform.b;
-        let c = transform.c;
-        let d = transform.d;
-        let tx = transform.tx;
-        let ty = transform.ty;
+        #[cfg(debug_assertions)]
+        record_affine_path(false, axis_aligned);
+
+        let a_fp = affine_fixed_from_f32(transform.a);
+        let b_fp = affine_fixed_from_f32(transform.b);
+        let c_fp = affine_fixed_from_f32(transform.c);
+        let d_fp = affine_fixed_from_f32(transform.d);
+        let tx_fp = affine_fixed_from_f32(transform.tx);
+        let ty_fp = affine_fixed_from_f32(transform.ty);
 
         let mut i = 0usize;
         while i + 2 < indices.len() {
@@ -463,20 +512,20 @@ impl FbView {
             let v2 = verts[ic];
 
             let (ax, ay, bx, by, cx, cy) = if axis_aligned {
-                let ax = (a * v0.x as f32 + tx).round() as i32;
-                let ay = (d * v0.y as f32 + ty).round() as i32;
-                let bx = (a * v1.x as f32 + tx).round() as i32;
-                let by = (d * v1.y as f32 + ty).round() as i32;
-                let cx = (a * v2.x as f32 + tx).round() as i32;
-                let cy = (d * v2.y as f32 + ty).round() as i32;
+                let ax = affine_fixed_round(a_fp * v0.x as i64 + tx_fp);
+                let ay = affine_fixed_round(d_fp * v0.y as i64 + ty_fp);
+                let bx = affine_fixed_round(a_fp * v1.x as i64 + tx_fp);
+                let by = affine_fixed_round(d_fp * v1.y as i64 + ty_fp);
+                let cx = affine_fixed_round(a_fp * v2.x as i64 + tx_fp);
+                let cy = affine_fixed_round(d_fp * v2.y as i64 + ty_fp);
                 (ax, ay, bx, by, cx, cy)
             } else {
-                let ax = (a * v0.x as f32 + c * v0.y as f32 + tx).round() as i32;
-                let ay = (b0 * v0.x as f32 + d * v0.y as f32 + ty).round() as i32;
-                let bx = (a * v1.x as f32 + c * v1.y as f32 + tx).round() as i32;
-                let by = (b0 * v1.x as f32 + d * v1.y as f32 + ty).round() as i32;
-                let cx = (a * v2.x as f32 + c * v2.y as f32 + tx).round() as i32;
-                let cy = (b0 * v2.x as f32 + d * v2.y as f32 + ty).round() as i32;
+                let ax = affine_fixed_round(a_fp * v0.x as i64 + c_fp * v0.y as i64 + tx_fp);
+                let ay = affine_fixed_round(b_fp * v0.x as i64 + d_fp * v0.y as i64 + ty_fp);
+                let bx = affine_fixed_round(a_fp * v1.x as i64 + c_fp * v1.y as i64 + tx_fp);
+                let by = affine_fixed_round(b_fp * v1.x as i64 + d_fp * v1.y as i64 + ty_fp);
+                let cx = affine_fixed_round(a_fp * v2.x as i64 + c_fp * v2.y as i64 + tx_fp);
+                let cy = affine_fixed_round(b_fp * v2.x as i64 + d_fp * v2.y as i64 + ty_fp);
                 (ax, ay, bx, by, cx, cy)
             };
 
@@ -530,6 +579,8 @@ impl FbView {
 
     unsafe fn draw_tris_wireframe_affine(&self, verts: &[Vertex2], indices: &[u16], transform: Matrix2D, r: u8, g: u8, b: u8) {
         if transform.is_translation() {
+            #[cfg(debug_assertions)]
+            record_affine_path(true, false);
             let tx = transform.tx.round() as i32;
             let ty = transform.ty.round() as i32;
             self.draw_tris_wireframe(verts, indices, tx, ty, r, g, b);
@@ -537,12 +588,15 @@ impl FbView {
         }
 
         let axis_aligned = transform.is_axis_aligned();
-        let a = transform.a;
-        let b0 = transform.b;
-        let c = transform.c;
-        let d = transform.d;
-        let tx = transform.tx;
-        let ty = transform.ty;
+        #[cfg(debug_assertions)]
+        record_affine_path(false, axis_aligned);
+
+        let a_fp = affine_fixed_from_f32(transform.a);
+        let b_fp = affine_fixed_from_f32(transform.b);
+        let c_fp = affine_fixed_from_f32(transform.c);
+        let d_fp = affine_fixed_from_f32(transform.d);
+        let tx_fp = affine_fixed_from_f32(transform.tx);
+        let ty_fp = affine_fixed_from_f32(transform.ty);
 
         let mut i = 0usize;
         while i + 2 < indices.len() {
@@ -557,20 +611,20 @@ impl FbView {
             let v2 = verts[ic];
 
             let (ax, ay, bx, by, cx, cy) = if axis_aligned {
-                let ax = (a * v0.x as f32 + tx).round() as i32;
-                let ay = (d * v0.y as f32 + ty).round() as i32;
-                let bx = (a * v1.x as f32 + tx).round() as i32;
-                let by = (d * v1.y as f32 + ty).round() as i32;
-                let cx = (a * v2.x as f32 + tx).round() as i32;
-                let cy = (d * v2.y as f32 + ty).round() as i32;
+                let ax = affine_fixed_round(a_fp * v0.x as i64 + tx_fp);
+                let ay = affine_fixed_round(d_fp * v0.y as i64 + ty_fp);
+                let bx = affine_fixed_round(a_fp * v1.x as i64 + tx_fp);
+                let by = affine_fixed_round(d_fp * v1.y as i64 + ty_fp);
+                let cx = affine_fixed_round(a_fp * v2.x as i64 + tx_fp);
+                let cy = affine_fixed_round(d_fp * v2.y as i64 + ty_fp);
                 (ax, ay, bx, by, cx, cy)
             } else {
-                let ax = (a * v0.x as f32 + c * v0.y as f32 + tx).round() as i32;
-                let ay = (b0 * v0.x as f32 + d * v0.y as f32 + ty).round() as i32;
-                let bx = (a * v1.x as f32 + c * v1.y as f32 + tx).round() as i32;
-                let by = (b0 * v1.x as f32 + d * v1.y as f32 + ty).round() as i32;
-                let cx = (a * v2.x as f32 + c * v2.y as f32 + tx).round() as i32;
-                let cy = (b0 * v2.x as f32 + d * v2.y as f32 + ty).round() as i32;
+                let ax = affine_fixed_round(a_fp * v0.x as i64 + c_fp * v0.y as i64 + tx_fp);
+                let ay = affine_fixed_round(b_fp * v0.x as i64 + d_fp * v0.y as i64 + ty_fp);
+                let bx = affine_fixed_round(a_fp * v1.x as i64 + c_fp * v1.y as i64 + tx_fp);
+                let by = affine_fixed_round(b_fp * v1.x as i64 + d_fp * v1.y as i64 + ty_fp);
+                let cx = affine_fixed_round(a_fp * v2.x as i64 + c_fp * v2.y as i64 + tx_fp);
+                let cy = affine_fixed_round(b_fp * v2.x as i64 + d_fp * v2.y as i64 + ty_fp);
                 (ax, ay, bx, by, cx, cy)
             };
 

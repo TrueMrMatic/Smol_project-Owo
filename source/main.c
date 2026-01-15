@@ -20,6 +20,7 @@ void   bridge_print_status(void* ctx);
 void   bridge_request_command_dump_ctx(void* ctx);
 void   bridge_toggle_wireframe_once_ctx(void* ctx);
 void   bridge_set_wireframe_hold_ctx(void* ctx, int enabled);
+uint32_t bridge_toggle_affine_debug_overlay_ctx(void* ctx);
 uint32_t bridge_renderer_ready_ctx(void* ctx);
 size_t bridge_get_status_text(void* ctx, char* out, size_t cap);
 
@@ -42,12 +43,12 @@ static void clear_top_black_double(void) {
 #define UI_ROW_SWF 2
 #define UI_ROW_SEPARATOR 3
 #define UI_ROW_CONTROLS 4
-#define UI_ROW_LOG_LABEL 10
-#define UI_ROW_LOG_START 11
+#define UI_ROW_LOG_LABEL 11
+#define UI_ROW_LOG_START 12
 #define UI_LOG_LINES 16
-#define UI_ROW_NOTICE 27
-#define UI_ROW_WARN 28
-#define UI_ROW_HUD 29
+#define UI_ROW_NOTICE 28
+#define UI_ROW_WARN 29
+#define UI_ROW_HUD 30
 
 static const char* path_basename(const char* path) {
     const char* last = path;
@@ -71,8 +72,9 @@ static void ui_draw_static(const char* swf_path) {
     printf("\x1b[%d;0H  L: wireframe (hold)", UI_ROW_CONTROLS + 1);
     printf("\x1b[%d;0H  Y: write diag snapshot", UI_ROW_CONTROLS + 2);
     printf("\x1b[%d;0H  X: dump frame cmds", UI_ROW_CONTROLS + 3);
-    printf("\x1b[%d;0H  B: back", UI_ROW_CONTROLS + 4);
-    printf("\x1b[%d;0H  START: exit app", UI_ROW_CONTROLS + 5);
+    printf("\x1b[%d;0H  L+R+X: affine overlay", UI_ROW_CONTROLS + 4);
+    printf("\x1b[%d;0H  B: back", UI_ROW_CONTROLS + 5);
+    printf("\x1b[%d;0H  START: exit app", UI_ROW_CONTROLS + 6);
     printf("\x1b[%d;0HLogs:", UI_ROW_LOG_LABEL);
     ui_clear_log_window();
 }
@@ -315,8 +317,13 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (down & KEY_X) {
-                bridge_request_command_dump_ctx(ctx);
-                ui_set_notice("frame dump requested", 60);
+                if ((held & KEY_L) && (held & KEY_R)) {
+                    uint32_t enabled = bridge_toggle_affine_debug_overlay_ctx(ctx);
+                    ui_set_notice(enabled ? "affine overlay on" : "affine overlay off", 60);
+                } else {
+                    bridge_request_command_dump_ctx(ctx);
+                    ui_set_notice("frame dump requested", 60);
+                }
             }
 
             // Tick+Render

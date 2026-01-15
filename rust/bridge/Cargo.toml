@@ -6,6 +6,16 @@ edition = "2021"
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+# Bisect plan: build with e.g. `--no-default-features --features navigator` or
+# `--no-default-features --features storage` to isolate TLS-heavy subsystems.
+# Default keeps current behavior.
+default = ["navigator", "sockets", "storage", "async_tasks"]
+navigator = []
+sockets = ["navigator"]
+storage = []
+async_tasks = []
+
 [dependencies]
 # Ruffle crates
 # Pinned to a known nightly tag for API stability.
