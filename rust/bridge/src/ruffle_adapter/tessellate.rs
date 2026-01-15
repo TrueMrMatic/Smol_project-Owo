@@ -7,6 +7,7 @@
 //! - No per-frame allocations: tessellation runs at **register_shape** time.
 
 use crate::render::cache::shapes::{FillMesh, Vertex2};
+use crate::runlog;
 use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath, FillRule};
 
 // We use earcut for robust polygon-with-holes triangulation.
@@ -19,6 +20,9 @@ pub enum TessError {
     TooManyVerts,
     EarcutFailed,
 }
+
+const MAX_POINTS_PER_FILL: usize = 4096;
+const MAX_VERTS_PER_MESH: usize = u16::MAX as usize;
 
 /// Output of shape tessellation.
 ///
@@ -40,6 +44,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
     let mut fills: Vec<FillMesh> = Vec::new();
     let mut any_failed = false;
 
+    let tol_px = tessellation_tolerance_px(shape);
     for path in &shape.paths {
         let (commands, rule) = match path {
             DrawPath::Fill { commands, winding_rule, .. } => (commands, *winding_rule),
@@ -50,7 +55,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
         let mut out_indices: Vec<u16> = Vec::new();
 
         // 1) Flatten commands into closed contours (multiple subpaths supported).
-        let mut contours: Vec<Vec<(f32, f32)>> = flatten_commands_to_contours(commands.iter(), 0.75);
+        let mut contours: Vec<Vec<(f32, f32)>> = flatten_commands_to_contours(commands.iter(), tol_px);
         for c in contours.iter_mut() {
             normalize_ring(c);
             simplify_ring(c);
@@ -58,6 +63,12 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
         contours.retain(|c| c.len() >= 3 && polygon_area_abs(c) > 0.5);
         if contours.is_empty() {
             any_failed = true;
+            continue;
+        }
+        let total_points: usize = contours.iter().map(|c| c.len()).sum();
+        if total_points > MAX_POINTS_PER_FILL {
+            any_failed = true;
+            runlog::warn_line(&format!("tessellate_fills cap_points total={}", total_points));
             continue;
         }
 
@@ -71,7 +82,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
         // 3) Triangulate each outer-with-holes group using earcut and merge into this fill mesh.
         for group in groups {
             let base = out_verts.len();
-            if base >= u16::MAX as usize {
+            if base >= MAX_VERTS_PER_MESH {
                 return Err(TessError::TooManyVerts);
             }
 
@@ -83,6 +94,9 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
                 hole_starts.push(out_verts.len() - base);
                 append_contour(&mut coords, &mut out_verts, h);
             }
+            if out_verts.len() > MAX_VERTS_PER_MESH {
+                return Err(TessError::TooManyVerts);
+            }
 
             let idx = earcut(&coords, &hole_starts, 2).map_err(|_| TessError::EarcutFailed)?;
             if idx.len() < 3 || idx.len() % 3 != 0 {
@@ -91,7 +105,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
 
             for &i in idx.iter() {
                 let vi = base + i;
-                if vi > u16::MAX as usize {
+                if vi >= MAX_VERTS_PER_MESH {
                     return Err(TessError::TooManyVerts);
                 }
                 out_indices.push(vi as u16);
@@ -110,6 +124,15 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
         return Err(TessError::NoContours);
     }
     Ok(TessOutput { fills, any_failed })
+}
+
+fn tessellation_tolerance_px(shape: &DistilledShape<'_>) -> f32 {
+    let bounds = shape.shape_bounds;
+    let w = (bounds.x_max - bounds.x_min).to_pixels().abs() as f32;
+    let h = (bounds.y_max - bounds.y_min).to_pixels().abs() as f32;
+    let max_dim = w.max(h).max(1.0);
+    let base = (max_dim * 0.004).clamp(0.6, 2.5);
+    base
 }
 
 // -----------------
