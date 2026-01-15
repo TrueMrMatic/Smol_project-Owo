@@ -1,4 +1,4 @@
-# Ruffle 3DS (Prototype)
+# Ruffle 3DS (Tash chatbot prototype)
 
 Hybrid **C (3DS homebrew)** + **Rust (Ruffle-based core + renderer bridge)** Flash player prototype.
 
