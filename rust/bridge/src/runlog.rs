@@ -19,11 +19,13 @@ const STAGE_FLUSH_MS: u64 = 250;
 const STATUS_FLUSH_MS: u64 = 200;
 const BOOTTRACE_BUF_MAX: usize = 2048;
 const CONSOLE_QUEUE_MAX: usize = 64;
+const RECENT_WARNINGS_MAX: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Level { Info, Warn, Error }
 
 struct RunLog {
+    swf_name: String,
     run_dir: String,
     boottrace_path: String,
     last_stage_path: String,
@@ -53,9 +55,10 @@ struct RunLog {
 
     // console ring buffer of important lines for C HUD
     console_q: VecDeque<String>,
+    recent_warnings: VecDeque<String>,
 }
 
-static RUNLOG: OnceLock<Mutex<RunLog>> = OnceLock::new();
+static RUNLOG: OnceLock<Mutex<Option<RunLog>>> = OnceLock::new();
 
 pub fn build_id() -> &'static str { BUILD_ID }
 pub fn base_id() -> &'static str { BASE_ID }
@@ -101,9 +104,7 @@ fn pick_run_dir(root_path: &str) -> String {
 }
 
 pub fn init_for_swf(root_path: &str) {
-    // Don't re-init if already set (one runlog per SWF launch)
-    if RUNLOG.get().is_some() { return; }
-
+    let swf_name = swf_basename(root_path);
     let run_dir = pick_run_dir(root_path);
     let boottrace_path = format!("{}/boottrace.txt", run_dir);
     let last_stage_path = format!("{}/last_stage.txt", run_dir);
@@ -115,6 +116,7 @@ pub fn init_for_swf(root_path: &str) {
     let warnings_file = open_append(&warnings_path).unwrap();
 
     let mut rl = RunLog {
+        swf_name: swf_name.clone(),
         run_dir: run_dir.clone(),
         boottrace_path: boottrace_path.clone(),
         last_stage_path: last_stage_path.clone(),
@@ -134,6 +136,7 @@ pub fn init_for_swf(root_path: &str) {
         status_q: VecDeque::new(),
         last_status_flush_ms: 0,
         console_q: VecDeque::new(),
+        recent_warnings: VecDeque::new(),
     };
 
     // Build info + pointer file to quickly find the run folder
@@ -153,7 +156,18 @@ pub fn init_for_swf(root_path: &str) {
     rl.last_flush_ms = now_ms();
     rl.last_stage_flush_ms = rl.last_flush_ms;
 
-    let _ = RUNLOG.set(Mutex::new(rl));
+    let lock = RUNLOG.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = lock.lock() {
+        if let Some(existing) = guard.as_ref() {
+            if existing.swf_name == swf_name {
+                return;
+            }
+        }
+        if let Some(mut existing) = guard.take() {
+            shutdown_locked(&mut existing);
+        }
+        *guard = Some(rl);
+    }
 
     log_important(&format!("RunLog init ok run_dir={}", run_dir));
 }
@@ -166,6 +180,13 @@ fn push_console(rl: &mut RunLog, line: &str) {
         rl.console_q.pop_front();
     }
     rl.console_q.push_back(line.to_string());
+}
+
+fn push_recent_warning(rl: &mut RunLog, line: &str) {
+    if rl.recent_warnings.len() >= RECENT_WARNINGS_MAX {
+        rl.recent_warnings.pop_front();
+    }
+    rl.recent_warnings.push_back(line.to_string());
 }
 
 fn maybe_flush(rl: &mut RunLog, force: bool) {
@@ -197,7 +218,10 @@ fn maybe_flush_stage(rl: &mut RunLog, force: bool) {
 
 fn log_impl(level: Level, msg: &str, important: bool) {
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(mut rl) = lock.lock() {
+        if let Ok(mut guard) = lock.lock() {
+            let Some(rl) = guard.as_mut() else {
+                return;
+            };
             rl.seq = rl.seq.wrapping_add(1);
             let tag = match level { Level::Info => "INFO", Level::Warn => "WARN", Level::Error => "ERR " };
             let line = format!("[{:06}] {} {}\n", rl.seq, tag, msg);
@@ -211,6 +235,7 @@ fn log_impl(level: Level, msg: &str, important: bool) {
             if level != Level::Info {
                 let _ = rl.warnings.write_all(line.as_bytes());
                 let _ = rl.warnings.flush();
+                push_recent_warning(rl, line.trim_end());
             }
 
             // Console output: keep lightweight by default
@@ -218,10 +243,10 @@ fn log_impl(level: Level, msg: &str, important: bool) {
                 // Trim for console
                 let mut s = line.trim_end().to_string();
                 if s.len() > 60 { s.truncate(60); }
-                push_console(&mut rl, &s);
+                push_console(rl, &s);
             }
 
-            maybe_flush(&mut rl, important);
+            maybe_flush(rl, important);
         }
     }
 }
@@ -235,15 +260,18 @@ pub fn error_line(msg: &str) { log_impl(Level::Error, msg, true); }
 /// This updates memory every call; SD write is rate-limited and can be forced.
 pub fn stage(stage: &str, frame: u64) {
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(mut rl) = lock.lock() {
+        if let Ok(mut guard) = lock.lock() {
+            let Some(rl) = guard.as_mut() else {
+                return;
+            };
             rl.last_stage = stage.to_string();
             rl.last_stage_frame = frame;
             // Only force stage flush if we're entering a potentially-heavy phase.
             let force = stage.contains("tess") || stage.contains("earcut") || stage.contains("register_shape");
-            maybe_flush_stage(&mut rl, force);
+            maybe_flush_stage(rl, force);
             // Also rate-limited boottrace flush when entering heavy work.
             if force {
-                maybe_flush(&mut rl, true);
+                maybe_flush(rl, true);
             }
         }
     }
@@ -251,7 +279,10 @@ pub fn stage(stage: &str, frame: u64) {
 
 pub fn status_snapshot(text: &str) {
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(mut rl) = lock.lock() {
+        if let Ok(mut guard) = lock.lock() {
+            let Some(rl) = guard.as_mut() else {
+                return;
+            };
             if rl.status_q.len() < 16 {
                 rl.status_q.push_back(text.to_string());
             } else {
@@ -265,7 +296,10 @@ pub fn status_snapshot(text: &str) {
 /// Flush deferred status snapshots without blocking input/UI.
 pub fn tick() {
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(mut rl) = lock.lock() {
+        if let Ok(mut guard) = lock.lock() {
+            let Some(rl) = guard.as_mut() else {
+                return;
+            };
             let now = now_ms();
             if rl.status_q.is_empty() {
                 return;
@@ -289,7 +323,10 @@ pub fn tick() {
 pub fn drain_console(out: &mut [u8]) -> usize {
     if out.is_empty() { return 0; }
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(mut rl) = lock.lock() {
+        if let Ok(mut guard) = lock.lock() {
+            let Some(rl) = guard.as_mut() else {
+                return 0;
+            };
             let mut written = 0usize;
             while let Some(line) = rl.console_q.pop_front() {
                 let bytes = line.as_bytes();
@@ -311,7 +348,10 @@ pub fn drain_console(out: &mut [u8]) -> usize {
 
 pub fn set_verbosity(level: u8) {
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(mut rl) = lock.lock() {
+        if let Ok(mut guard) = lock.lock() {
+            let Some(rl) = guard.as_mut() else {
+                return;
+            };
             let requested = level.min(2);
             rl.verbosity = 2;
             // Echo to both console and file
@@ -319,8 +359,8 @@ pub fn set_verbosity(level: u8) {
             rl.seq = rl.seq.wrapping_add(1);
             let seq = rl.seq;
             rl.bt_buf.push_str(&format!("[{:06}] INFO {}\n", seq, msg));
-            push_console(&mut rl, &format!("INFO {}", msg));
-            maybe_flush(&mut rl, true);
+            push_console(rl, &format!("INFO {}", msg));
+            maybe_flush(rl, true);
         }
     }
 }
@@ -329,8 +369,10 @@ pub fn set_verbosity(level: u8) {
 /// Current runlog verbosity (0..2).
 pub fn get_verbosity() -> u8 {
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(rl) = lock.lock() {
-            return rl.verbosity;
+        if let Ok(guard) = lock.lock() {
+            if let Some(rl) = guard.as_ref() {
+                return rl.verbosity;
+            }
         }
     }
     0
@@ -338,28 +380,55 @@ pub fn get_verbosity() -> u8 {
 
 pub fn is_verbose() -> bool { get_verbosity() >= 2 }
 
+#[derive(Clone, Debug)]
+pub struct RunlogSnapshot {
+    pub last_stage: String,
+    pub last_stage_frame: u64,
+    pub recent_warnings: Vec<String>,
+}
+
+pub fn snapshot_info() -> Option<RunlogSnapshot> {
+    if let Some(lock) = RUNLOG.get() {
+        if let Ok(guard) = lock.lock() {
+            if let Some(rl) = guard.as_ref() {
+                return Some(RunlogSnapshot {
+                    last_stage: rl.last_stage.clone(),
+                    last_stage_frame: rl.last_stage_frame,
+                    recent_warnings: rl.recent_warnings.iter().cloned().collect(),
+                });
+            }
+        }
+    }
+    None
+}
+
 pub fn cycle_verbosity() {
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(rl) = lock.lock() {
-            let _ = rl;
-            drop(rl);
+        if let Ok(guard) = lock.lock() {
+            drop(guard);
             set_verbosity(2);
         }
     }
 }
 
+fn shutdown_locked(rl: &mut RunLog) {
+    maybe_flush(rl, true);
+    while let Some(text) = rl.status_q.pop_front() {
+        rl.seq = rl.seq.wrapping_add(1);
+        let line = format!("[{:06}] {}\n", rl.seq, text);
+        let _ = rl.status.write_all(line.as_bytes());
+    }
+    let _ = rl.status.flush();
+    let _ = rl.warnings.flush();
+    maybe_flush_stage(rl, true);
+}
+
 pub fn shutdown() {
     if let Some(lock) = RUNLOG.get() {
-        if let Ok(mut rl) = lock.lock() {
-            maybe_flush(&mut rl, true);
-            while let Some(text) = rl.status_q.pop_front() {
-                rl.seq = rl.seq.wrapping_add(1);
-                let line = format!("[{:06}] {}\n", rl.seq, text);
-                let _ = rl.status.write_all(line.as_bytes());
+        if let Ok(mut guard) = lock.lock() {
+            if let Some(mut rl) = guard.take() {
+                shutdown_locked(&mut rl);
             }
-            let _ = rl.status.flush();
-            let _ = rl.warnings.flush();
-            maybe_flush_stage(&mut rl, true);
         }
     }
 }

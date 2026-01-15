@@ -33,8 +33,12 @@ Every run writes a **run bundle** with stage markers and status snapshots under:
 
 See `docs/SD_Run_Artifacts.md` for the exact file list.
 
+### Diagnostics flow
+- Run bundles are reinitialized per SWF selection.
+- Y writes multi-line diagnostic snapshots (last stage, cache stats, draw stats, warnings).
+- X requests a one-frame command dump to correlate command lists with mesh usage.
+
 ## Performance constraints
 - Avoid per-frame allocations in the render path
 - Avoid per-frame filesystem writes
 - Prefer linear-time operations with strict caps
-

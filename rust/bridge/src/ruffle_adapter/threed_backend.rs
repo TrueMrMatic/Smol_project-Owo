@@ -259,6 +259,102 @@ impl ThreeDSBackend {
         // C HUD prepends "FPS:xx " (7 chars), and the bottom console line is 40 chars.
         trim_to(&line, 32).to_string()
     }
+
+    pub fn status_snapshot_full(&self) -> String {
+        struct SnapshotDiag {
+            seen_real_draw: bool,
+            swf_version: u8,
+            shapes_registered: u32,
+            bitmaps_registered: u32,
+            frames_submitted: u32,
+            last_cmds_total: u32,
+            last_cmds_shapes: u32,
+            last_cmds_bitmaps: u32,
+            last_cmds_other: u32,
+            last_tris: u32,
+            last_warning: Option<String>,
+            last_fatal: Option<String>,
+        }
+
+        let diag = {
+            let s = self.shared.lock().unwrap();
+            SnapshotDiag {
+                seen_real_draw: s.seen_real_draw,
+                swf_version: s.diagnostics.swf_version,
+                shapes_registered: s.diagnostics.shapes_registered,
+                bitmaps_registered: s.diagnostics.bitmaps_registered,
+                frames_submitted: s.diagnostics.frames_submitted,
+                last_cmds_total: s.diagnostics.last_cmds_total,
+                last_cmds_shapes: s.diagnostics.last_cmds_shapes,
+                last_cmds_bitmaps: s.diagnostics.last_cmds_bitmaps,
+                last_cmds_other: s.diagnostics.last_cmds_other,
+                last_tris: s.diagnostics.last_tris,
+                last_warning: s.diagnostics.last_warning.clone(),
+                last_fatal: s.diagnostics.last_fatal.clone(),
+            }
+        };
+
+        let (fill_missing, fill_invalid, fill_bounds) = self.caches.shapes.lock().unwrap().stats();
+        let (stroke_missing, stroke_invalid, stroke_bounds) = self.caches.shapes.lock().unwrap().stroke_stats();
+        let draw_stats = crate::render::executor::last_draw_stats();
+        let runlog_info = runlog::snapshot_info();
+
+        let mut out = String::new();
+        let mode = if diag.seen_real_draw { "OK" } else { "LD" };
+        out.push_str(&format!(
+            "mode={} swf_v={} frames_submitted={}\n",
+            mode, diag.swf_version, diag.frames_submitted
+        ));
+        out.push_str(&format!(
+            "registered shapes={} bitmaps={}\n",
+            diag.shapes_registered, diag.bitmaps_registered
+        ));
+        out.push_str(&format!(
+            "last_frame cmds total={} shapes={} bitmaps={} other={} tris={}\n",
+            diag.last_cmds_total,
+            diag.last_cmds_shapes,
+            diag.last_cmds_bitmaps,
+            diag.last_cmds_other,
+            diag.last_tris
+        ));
+        out.push_str(&format!(
+            "shape_cache fill missing={} invalid={} bounds_fallbacks={} stroke missing={} invalid={} bounds_fallbacks={}\n",
+            fill_missing,
+            fill_invalid,
+            fill_bounds,
+            stroke_missing,
+            stroke_invalid,
+            stroke_bounds
+        ));
+        out.push_str(&format!(
+            "draw_stats mesh_tris={} rect_fastpath={} bounds_fallbacks={}\n",
+            draw_stats.mesh_tris,
+            draw_stats.rect_fastpath,
+            draw_stats.bounds_fallbacks
+        ));
+
+        if let Some(info) = runlog_info {
+            out.push_str(&format!(
+                "last_stage frame={} stage={}\n",
+                info.last_stage_frame, info.last_stage
+            ));
+            if !info.recent_warnings.is_empty() {
+                out.push_str("recent_warnings:\n");
+                for warning in info.recent_warnings {
+                    out.push_str(&format!("  - {}\n", warning));
+                }
+            }
+        }
+
+        if let Some(warn) = diag.last_warning {
+            out.push_str(&format!("last_warning={}\n", warn));
+        }
+        if let Some(fatal) = diag.last_fatal {
+            out.push_str(&format!("last_fatal={}\n", fatal));
+        }
+
+        out
+    }
 }
 
 // --------------------------
@@ -311,12 +407,12 @@ impl RenderBackend for ThreeDSBackend {
             runlog::log_line(&format!("register_shape begin id={} b={} {} {} {}", id, bounds.x, bounds.y, bounds.w, bounds.h));
         }
 
-        let (fills, fill_failed, fill_partial) = match tessellate::tessellate_fills(&shape) {
+        let (fills, fill_failed, fill_partial) = match tessellate::tessellate_fills(&shape, id) {
             Ok(res) => (res.fills, false, res.any_failed),
             Err(tessellate::TessError::NoContours) => (Vec::new(), false, false),
             Err(_) => (Vec::new(), true, false),
         };
-        let (strokes, stroke_failed, stroke_partial) = match tessellate::tessellate_strokes(&shape) {
+        let (strokes, stroke_failed, stroke_partial) = match tessellate::tessellate_strokes(&shape, id) {
             Ok(res) => (res.strokes, false, res.any_failed),
             Err(tessellate::TessError::NoContours) => (Vec::new(), false, false),
             Err(_) => (Vec::new(), true, false),
@@ -335,6 +431,28 @@ impl RenderBackend for ThreeDSBackend {
             stroke_partial,
             text_shape,
         );
+
+        if runlog::is_verbose() {
+            let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
+            let stroke_tris: u32 = strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
+            runlog::log_line(&format!(
+                "shape_summary id={} b={} {} {} {} fills={} fill_tris={} strokes={} stroke_tris={} tess_failed={} tess_partial={} stroke_failed={} stroke_partial={} text={}",
+                id,
+                bounds.x,
+                bounds.y,
+                bounds.w,
+                bounds.h,
+                fills.len(),
+                fill_tris,
+                strokes.len(),
+                stroke_tris,
+                fill_failed,
+                fill_partial,
+                stroke_failed,
+                stroke_partial,
+                text_shape
+            ));
+        }
 
         if fill_failed {
             if runlog::is_verbose() {

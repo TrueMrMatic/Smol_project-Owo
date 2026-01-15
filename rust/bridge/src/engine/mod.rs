@@ -25,6 +25,7 @@ pub struct Engine {
     #[allow(dead_code)]
     root_file_url: String,
     frame_counter: u64,
+    last_heartbeat_ms: u64,
     pending_snapshot: Option<String>,
 }
 
@@ -81,6 +82,7 @@ impl Engine {
             root_path,
             root_file_url,
             frame_counter: 0,
+            last_heartbeat_ms: 0,
             pending_snapshot: None,
         })
     }
@@ -91,9 +93,20 @@ impl Engine {
     pub fn tick_and_render(&mut self) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
         runlog::tick();
-        if (self.frame_counter % 60) == 0 {
-            if runlog::is_verbose() {
-                runlog::log_line(&format!("tick heartbeat frames={} stage=submit_frame", self.frame_counter));
+        if runlog::is_verbose() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if self.last_heartbeat_ms == 0 {
+                self.last_heartbeat_ms = now;
+            }
+            if now.saturating_sub(self.last_heartbeat_ms) >= 30_000 {
+                self.last_heartbeat_ms = now;
+                runlog::log_line(&format!(
+                    "tick heartbeat frames={} stage=submit_frame",
+                    self.frame_counter
+                ));
             }
         }
         // Poll any async-ish tasks queued by Ruffle backends.
@@ -114,7 +127,7 @@ impl Engine {
         self.backend.begin_frame();
 
         if let Some(reason) = self.pending_snapshot.take() {
-            let snap = format!("{} {}", reason, self.status_text());
+            let snap = format!("reason={}\n{}", reason, self.backend.status_snapshot_full());
             runlog::status_snapshot(&snap);
         }
 

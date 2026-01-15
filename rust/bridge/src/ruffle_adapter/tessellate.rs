@@ -45,12 +45,13 @@ pub struct StrokeOutput {
 /// Tessellate filled regions of a Ruffle distilled shape.
 ///
 /// Output coordinates are in **pixel units**, in the shape's local space.
-pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessError> {
+pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<TessOutput, TessError> {
     // Registration-time tessellation.
     // We output one mesh per Fill path so the renderer can draw multiple fills for a single shape.
     // Each Fill path comes with its own winding_rule.
     let mut fills: Vec<FillMesh> = Vec::new();
     let mut any_failed = false;
+    let mut fill_paths = 0usize;
 
     let tol_px = tessellation_tolerance_px(shape);
     for path in &shape.paths {
@@ -58,6 +59,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
             DrawPath::Fill { commands, winding_rule, .. } => (commands, *winding_rule),
             _ => continue, // fills-only Step 2A
         };
+        fill_paths = fill_paths.saturating_add(1);
 
         let mut out_verts: Vec<Vertex2> = Vec::new();
         let mut out_indices: Vec<u16> = Vec::new();
@@ -76,7 +78,10 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
         let total_points: usize = contours.iter().map(|c| c.len()).sum();
         if total_points > MAX_POINTS_PER_FILL {
             any_failed = true;
-            runlog::warn_line(&format!("tessellate_fills cap_points total={}", total_points));
+            runlog::warn_line(&format!(
+                "tessellate_fills cap_points shape={} total={} paths={}",
+                shape_id, total_points, fill_paths
+            ));
             continue;
         }
 
@@ -92,6 +97,10 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
             orient_group_winding(&mut group);
             let base = out_verts.len();
             if base >= MAX_VERTS_PER_MESH {
+                runlog::warn_line(&format!(
+                    "tessellate_fills too_many_verts shape={} base={} paths={}",
+                    shape_id, base, fill_paths
+                ));
                 return Err(TessError::TooManyVerts);
             }
 
@@ -104,17 +113,42 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
                 append_contour(&mut coords, &mut out_verts, h);
             }
             if out_verts.len() > MAX_VERTS_PER_MESH {
+                runlog::warn_line(&format!(
+                    "tessellate_fills too_many_verts shape={} verts={} paths={}",
+                    shape_id,
+                    out_verts.len(),
+                    fill_paths
+                ));
                 return Err(TessError::TooManyVerts);
             }
 
-            let idx = earcut(&coords, &hole_starts, 2).map_err(|_| TessError::EarcutFailed)?;
+            let idx = earcut(&coords, &hole_starts, 2).map_err(|_| {
+                runlog::warn_line(&format!(
+                    "tessellate_fills earcut_failed shape={} verts={} holes={} paths={}",
+                    shape_id,
+                    out_verts.len(),
+                    hole_starts.len(),
+                    fill_paths
+                ));
+                TessError::EarcutFailed
+            })?;
             if idx.len() < 3 || idx.len() % 3 != 0 {
+                runlog::warn_line(&format!(
+                    "tessellate_fills earcut_invalid shape={} tris={} paths={}",
+                    shape_id,
+                    idx.len() / 3,
+                    fill_paths
+                ));
                 return Err(TessError::EarcutFailed);
             }
 
             for &i in idx.iter() {
                 let vi = base + i;
                 if vi >= MAX_VERTS_PER_MESH {
+                    runlog::warn_line(&format!(
+                        "tessellate_fills too_many_verts shape={} idx={} paths={}",
+                        shape_id, vi, fill_paths
+                    ));
                     return Err(TessError::TooManyVerts);
                 }
                 out_indices.push(vi as u16);
@@ -130,21 +164,34 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
     }
 
     if fills.is_empty() {
+        if fill_paths == 0 {
+            runlog::warn_line(&format!(
+                "tessellate_fills no_fill_paths shape={}",
+                shape_id
+            ));
+        } else {
+            runlog::warn_line(&format!(
+                "tessellate_fills no_contours shape={} paths={}",
+                shape_id, fill_paths
+            ));
+        }
         return Err(TessError::NoContours);
     }
     Ok(TessOutput { fills, any_failed })
 }
 
-pub fn tessellate_strokes(shape: &DistilledShape<'_>) -> Result<StrokeOutput, TessError> {
+pub fn tessellate_strokes(shape: &DistilledShape<'_>, shape_id: u32) -> Result<StrokeOutput, TessError> {
     let mut strokes: Vec<StrokeMesh> = Vec::new();
     let mut any_failed = false;
     let tol_px = tessellation_tolerance_px(shape);
+    let mut stroke_paths = 0usize;
 
     for path in &shape.paths {
         let (style, is_closed, commands) = match path {
             DrawPath::Stroke { style, is_closed, commands } => (style, *is_closed, commands),
             _ => continue,
         };
+        stroke_paths = stroke_paths.saturating_add(1);
 
         let FillStyle::Color(color) = style.fill_style() else {
             any_failed = true;
@@ -171,7 +218,10 @@ pub fn tessellate_strokes(shape: &DistilledShape<'_>) -> Result<StrokeOutput, Te
         let total_points: usize = polylines.iter().map(|c| c.len()).sum();
         if total_points > MAX_POINTS_PER_STROKE {
             any_failed = true;
-            runlog::warn_line(&format!("tessellate_strokes cap_points total={}", total_points));
+            runlog::warn_line(&format!(
+                "tessellate_strokes cap_points shape={} total={} paths={}",
+                shape_id, total_points, stroke_paths
+            ));
             continue;
         }
 
@@ -194,6 +244,17 @@ pub fn tessellate_strokes(shape: &DistilledShape<'_>) -> Result<StrokeOutput, Te
     }
 
     if strokes.is_empty() {
+        if stroke_paths == 0 {
+            runlog::warn_line(&format!(
+                "tessellate_strokes no_stroke_paths shape={}",
+                shape_id
+            ));
+        } else {
+            runlog::warn_line(&format!(
+                "tessellate_strokes no_contours shape={} paths={}",
+                shape_id, stroke_paths
+            ));
+        }
         return Err(TessError::NoContours);
     }
     Ok(StrokeOutput { strokes, any_failed })
