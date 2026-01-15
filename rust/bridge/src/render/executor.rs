@@ -4,7 +4,7 @@ use crate::render::SharedCaches;
 use crate::runlog;
 use crate::util::config;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub struct CommandExecutor;
 
