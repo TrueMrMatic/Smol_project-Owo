@@ -56,7 +56,7 @@ pub fn base_id() -> &'static str { BASE_ID }
 
 fn now_ms() -> u64 {
     let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    (dur.as_millis() as u64)
+    dur.as_millis() as u64
 }
 
 fn ensure_dir(p: &str) -> bool {

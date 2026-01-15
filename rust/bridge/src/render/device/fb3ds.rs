@@ -228,7 +228,7 @@ impl FbView {
                 continue;
             }
             let (sx, sy, ex, ey) = if x0 < x1 { (x0, y0, x1, y1) } else { (x1, y1, x0, y0) };
-            let mut x_start = sx.max(minx);
+            let x_start = sx.max(minx);
             let x_end = ex.min(maxx + 1);
             if x_end <= x_start {
                 continue;
