@@ -1,0 +1,23 @@
+[000001] INFO RunLog init ok run_dir=sdmc:/flash/_runs/PATCH_003_UI_Y_HARD_FIX/file1 (the-worlds-hardest-game).swf
+[000002] INFO Engine::new begin root_path=sdmc:/flash/file1 (the-worlds-hardest-game).swf
+[000003] INFO Engine::new read_file ok
+[000004] INFO Engine::new SwfMovie ok version=8
+[000005] INFO runlog verbosity=2
+[000006] INFO tick heartbeat frames=2100 stage=submit_frame
+[000007] INFO runlog verbosity=0
+[000009] INFO runlog verbosity=1
+[000012] INFO Engine shutdown
+[000013] INFO Engine::new begin root_path=sdmc:/flash/file1 (the-worlds-hardest-game).swf
+[000014] INFO Engine::new read_file ok
+[000015] INFO Engine::new SwfMovie ok version=8
+[000016] INFO runlog verbosity=2
+[000017] INFO tick heartbeat frames=2040 stage=submit_frame
+[000018] INFO runlog verbosity=0
+[000019] INFO runlog verbosity=1
+[000021] INFO Engine shutdown
+[000022] INFO Engine::new begin root_path=sdmc:/flash/file1 (the-worlds-hardest-game).swf
+[000023] INFO Engine::new read_file ok
+[000024] INFO Engine::new SwfMovie ok version=8
+[000025] INFO runlog verbosity=2
+[000026] INFO tick heartbeat frames=2040 stage=submit_frame
+[000028] INFO Engine shutdown
