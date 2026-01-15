@@ -1,11 +1,12 @@
-# Next Step Notes — for the next patch after PATCH_002_UI_SNAPSHOT_SAFETY
+# Next Step Notes — for the next patch after PATCH_003_UI_Y_HARD_FIX
 
-You are continuing from PATCH_002_UI_SNAPSHOT_SAFETY on top of PATCH_001_PROTOCOL_INIT_v2.
+You are continuing from PATCH_003_UI_Y_HARD_FIX on top of PATCH_002_UI_SNAPSHOT_SAFETY.
 
 ## Current state
 - Run logging + SD run bundles are in place with low overhead.
 - Bottom screen shows controls, a fixed log window, a notice line, and HUD status.
-- Snapshot hotkey (Y) is rate-limited and avoids command dumps to reduce crash risk.
+- Snapshot hotkey (Y) queues an async snapshot flush to avoid input-path stalls.
+- Rectangle render mode is removed; triangles are the only path.
 
 ## Inputs you will receive
 - A run bundle zip from the user (copied from SD) containing boottrace/last_stage/warnings/status snapshots.

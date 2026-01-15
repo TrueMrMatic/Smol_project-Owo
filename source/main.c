@@ -19,7 +19,6 @@ u32   bridge_runlog_drain(char* out, u32 out_len);
 void  bridge_runlog_cycle_verbosity(void);
 void   bridge_print_status(void* ctx);
 void   bridge_request_command_dump_ctx(void* ctx);
-void   bridge_toggle_shape_mode_ctx(void* ctx);
 void   bridge_toggle_wireframe_once_ctx(void* ctx);
 void   bridge_set_wireframe_hold_ctx(void* ctx, int enabled);
 uint32_t bridge_renderer_ready_ctx(void* ctx);
@@ -42,13 +41,14 @@ static void clear_top_black_double(void) {
 // ---- Bottom-screen UI layout ----
 #define UI_ROW_TITLE 1
 #define UI_ROW_SWF 2
-#define UI_ROW_CONTROLS 3
-#define UI_ROW_LOG_LABEL 8
-#define UI_ROW_LOG_START 9
+#define UI_ROW_SEPARATOR 3
+#define UI_ROW_CONTROLS 4
+#define UI_ROW_LOG_LABEL 9
+#define UI_ROW_LOG_START 10
 #define UI_LOG_LINES 16
-#define UI_ROW_NOTICE 27
-#define UI_ROW_WARN 28
-#define UI_ROW_HUD 29
+#define UI_ROW_NOTICE 26
+#define UI_ROW_WARN 27
+#define UI_ROW_HUD 28
 
 static const char* path_basename(const char* path) {
     const char* last = path;
@@ -67,8 +67,9 @@ static void ui_draw_static(const char* swf_path) {
     const char* base = path_basename(swf_path);
     printf("\x1b[%d;0HRuffle3DS Player", UI_ROW_TITLE);
     printf("\x1b[%d;0HSWF: %-36.36s", UI_ROW_SWF, base);
+    printf("\x1b[%d;0H========================================", UI_ROW_SEPARATOR);
     printf("\x1b[%d;0HControls:", UI_ROW_CONTROLS);
-    printf("\x1b[%d;0H  X: shape mode  L: wireframe", UI_ROW_CONTROLS + 1);
+    printf("\x1b[%d;0H  L: wireframe (hold)", UI_ROW_CONTROLS + 1);
     printf("\x1b[%d;0H  Y: write snapshot", UI_ROW_CONTROLS + 2);
     printf("\x1b[%d;0H  SELECT: verbosity  B: back", UI_ROW_CONTROLS + 3);
     printf("\x1b[%d;0H  START: exit app", UI_ROW_CONTROLS + 4);
@@ -99,6 +100,7 @@ static void ui_reset_log_state(void) {
     g_log_dirty = 1;
     g_notice[0] = 0;
     g_notice_ttl = 0;
+    g_last_snapshot_ms = 0;
     ui_clear_log_window();
 }
 
@@ -222,8 +224,8 @@ static void hud_draw(void* ctx) {
         } else {
             // Entire status is a warning token.
             size_t n = strnlen(status + 1, sizeof(warn) - 1);
-			memcpy(warn, status + 1, n);
-			warn[n] = '\0';
+			      memcpy(warn, status + 1, n);
+			      warn[n] = '\0';
         }
     }
 
@@ -301,11 +303,6 @@ int main(int argc, char* argv[]) {
 
             if (down & KEY_SELECT) {
                 bridge_runlog_cycle_verbosity();
-            }
-
-            if (down & KEY_X) {
-                // Toggle shape mode: rectangle bounds vs triangle mesh mode.
-                bridge_toggle_shape_mode_ctx(ctx);
             }
 
             // Hold L to show triangle edges continuously.

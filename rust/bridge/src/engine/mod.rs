@@ -25,6 +25,7 @@ pub struct Engine {
     #[allow(dead_code)]
     root_file_url: String,
     frame_counter: u64,
+    pending_snapshot: Option<String>,
 }
 
 impl Engine {
@@ -80,6 +81,7 @@ impl Engine {
             root_path,
             root_file_url,
             frame_counter: 0,
+            pending_snapshot: None,
         })
     }
 
@@ -88,10 +90,11 @@ impl Engine {
     /// This keeps the existing C-side loop unchanged: C calls `bridge_tick`, then swaps buffers.
     pub fn tick_and_render(&mut self) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
+        runlog::tick();
         if (self.frame_counter % 60) == 0 {
             if runlog::is_verbose() {
-            runlog::log_line(&format!("tick heartbeat frames={} stage=submit_frame", self.frame_counter));
-        }
+                runlog::log_line(&format!("tick heartbeat frames={} stage=submit_frame", self.frame_counter));
+            }
         }
         // Poll any async-ish tasks queued by Ruffle backends.
         self.backend.poll_tasks();
@@ -109,6 +112,11 @@ impl Engine {
         };
 
         self.backend.begin_frame();
+
+        if let Some(reason) = self.pending_snapshot.take() {
+            let snap = format!("{} {}", reason, self.status_text());
+            runlog::status_snapshot(&snap);
+        }
 
         // Trigger Ruffle rendering; this will call our backend hooks.
         {
@@ -131,24 +139,20 @@ impl Engine {
     }
 
     /// Append a short status snapshot to the SD run bundle.
-pub fn write_status_snapshot(&mut self, reason: &str) {
-    let s = self.status_text();
-    let snap = format!("{} {}", reason, s);
-        runlog::status_snapshot(&snap);
-}
-
-/// Graceful shutdown hook (flush run bundle files).
-pub fn shutdown(&mut self) {
-    runlog::log_line("Engine shutdown");
-    runlog::shutdown();
-}
-
-pub fn request_command_dump(&mut self) {
-        self.backend.request_command_dump();
+    pub fn request_status_snapshot(&mut self, reason: &str) {
+        if self.pending_snapshot.is_none() {
+            self.pending_snapshot = Some(reason.to_string());
+        }
     }
 
-    pub fn toggle_shape_mode(&mut self) {
-        self.backend.toggle_shape_mode();
+    /// Graceful shutdown hook (flush run bundle files).
+    pub fn shutdown(&mut self) {
+        runlog::log_line("Engine shutdown");
+        runlog::shutdown();
+    }
+
+    pub fn request_command_dump(&mut self) {
+        self.backend.request_command_dump();
     }
 
     pub fn toggle_wireframe_once(&mut self) {

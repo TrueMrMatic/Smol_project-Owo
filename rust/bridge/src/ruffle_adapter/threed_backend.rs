@@ -90,19 +90,12 @@ struct Diagnostics {
     last_fatal: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ShapeMode {
-    Rect,
-    Tris,
-}
-
 struct SharedState {
     frame: FramePacket,
     submit_called: bool,
     seen_real_draw: bool,
     dump_next_frame: bool,
     diagnostics: Diagnostics,
-    shape_mode: ShapeMode,
     wireframe_once: bool,
     wireframe_hold: bool,
 }
@@ -115,7 +108,6 @@ impl SharedState {
             seen_real_draw: false,
             dump_next_frame: false,
             diagnostics: Diagnostics::default(),
-            shape_mode: ShapeMode::Rect,
             wireframe_once: false,
             wireframe_hold: false,
         }
@@ -188,14 +180,6 @@ impl ThreeDSBackend {
         s.dump_next_frame = true;
     }
 
-    pub fn toggle_shape_mode(&self) {
-        let mut s = self.shared.lock().unwrap();
-        s.shape_mode = match s.shape_mode {
-            ShapeMode::Rect => ShapeMode::Tris,
-            ShapeMode::Tris => ShapeMode::Rect,
-        };
-    }
-
     pub fn toggle_wireframe_once(&self) {
         let mut s = self.shared.lock().unwrap();
         s.wireframe_once = true;
@@ -226,12 +210,10 @@ impl ThreeDSBackend {
 
         // Keep this short: the C HUD prepends "FPS:xx".
         let mode = if s.seen_real_draw { "OK" } else { "LD" };
-        let mflag = match s.shape_mode { ShapeMode::Tris => "mT", ShapeMode::Rect => "mR" };
         let mut line = format!(
-            "{} v{} {} t:{} sh:{} S:{} B:{}",
+            "{} v{} t:{} sh:{} S:{} B:{}",
             mode,
             s.diagnostics.swf_version,
-            mflag,
             s.diagnostics.last_tris,
             s.diagnostics.shapes_registered,
             s.diagnostics.last_cmds_shapes,
@@ -331,8 +313,6 @@ impl RenderBackend for ThreeDSBackend {
         s.frame.reset(clear);
         s.diagnostics.last_tris = 0;
 
-        // Snapshot current mode flags for this frame.
-        let mode_now = s.shape_mode;
         let wire_once = s.wireframe_once || s.wireframe_hold;
         // Wireframe is a one-shot flag.
         s.wireframe_once = false;
@@ -361,74 +341,62 @@ impl RenderBackend for ThreeDSBackend {
                     let tx = transform.matrix.tx.to_pixels() as i32;
                     let ty = transform.matrix.ty.to_pixels() as i32;
 
-                    match mode_now {
-                        ShapeMode::Tris => {
-                            if let Some(b) = shapes_cache.get_bounds(key) {
-                                // Per-shape early reject using translated bounds.
-                                // This avoids pushing per-fill commands for offscreen sprites.
-                                let tr = RectI { x: b.x + tx, y: b.y + ty, w: b.w, h: b.h };
-                                if tr.x + tr.w <= 0 || tr.y + tr.h <= 0 || tr.x >= 400 || tr.y >= 240 {
-                                    continue;
+                    if let Some(b) = shapes_cache.get_bounds(key) {
+                        // Per-shape early reject using translated bounds.
+                        // This avoids pushing per-fill commands for offscreen sprites.
+                        let tr = RectI { x: b.x + tx, y: b.y + ty, w: b.w, h: b.h };
+                        if tr.x + tr.w <= 0 || tr.y + tr.h <= 0 || tr.x >= 400 || tr.y >= 240 {
+                            continue;
+                        }
+
+                        if shapes_cache.has_mesh(key) {
+                            let shape_tris = shapes_cache.get_total_tri_count(key);
+                            if shape_tris > tris_budget {
+                                s.frame.cmds.push(RenderCmd::FillRect { rect: tr, color_key: key as u64, wireframe: wire_once });
+                                if s.diagnostics.last_warning.is_none() {
+                                    s.diagnostics.last_warning = Some("tri_cap".to_string());
                                 }
+                                if !tri_cap_warned {
+                                    runlog::warn_line("tri_cap budget exceeded; falling back to bounds");
+                                    tri_cap_warned = true;
+                                }
+                                continue;
+                            }
+                            let fill_count = shapes_cache.fill_count(key);
+                            // Emit one draw cmd per fill mesh.
+                            for fi in 0..fill_count {
+                                let color_key = (key as u64) ^ ((fi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                                s.frame.cmds.push(RenderCmd::DrawShapeSolidFill {
+                                    shape_key: key,
+                                    fill_idx: fi as u16,
+                                    tx,
+                                    ty,
+                                    color_key,
+                                    wireframe: wire_once,
+                                });
+                            }
+                            s.diagnostics.last_tris = s.diagnostics.last_tris.saturating_add(
+                                shapes_cache.get_total_tri_count(key),
+                            );
+                            tris_budget = tris_budget.saturating_sub(shape_tris);
 
-                                if shapes_cache.has_mesh(key) {
-                                    let shape_tris = shapes_cache.get_total_tri_count(key);
-                                    if shape_tris > tris_budget {
-                                        s.frame.cmds.push(RenderCmd::FillRect { rect: tr, color_key: key as u64, wireframe: wire_once });
-                                        if s.diagnostics.last_warning.is_none() {
-                                            s.diagnostics.last_warning = Some("tri_cap".to_string());
-                                        }
-                                        if !tri_cap_warned {
-                                            runlog::warn_line("tri_cap budget exceeded; falling back to bounds");
-                                            tri_cap_warned = true;
-                                        }
-                                        continue;
-                                    }
-                                    let fill_count = shapes_cache.fill_count(key);
-                                    // Emit one draw cmd per fill mesh.
-                                    for fi in 0..fill_count {
-                                        let color_key = (key as u64) ^ ((fi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                                        s.frame.cmds.push(RenderCmd::DrawShapeSolidFill {
-                                            shape_key: key,
-                                            fill_idx: fi as u16,
-                                            tx,
-                                            ty,
-                                            color_key,
-                                            wireframe: wire_once,
-                                        });
-                                    }
-                                    s.diagnostics.last_tris = s.diagnostics.last_tris.saturating_add(
-                                        shapes_cache.get_total_tri_count(key),
-                                    );
-                                    tris_budget = tris_budget.saturating_sub(shape_tris);
-
-                                    if shapes_cache.is_tess_partial(key) && s.diagnostics.last_warning.is_none() {
-                                        s.diagnostics.last_warning = Some("tri_part".to_string());
-                                    }
+                            if shapes_cache.is_tess_partial(key) && s.diagnostics.last_warning.is_none() {
+                                s.diagnostics.last_warning = Some("tri_part".to_string());
+                            }
+                        } else {
+                            // Fallback: bounds rect.
+                            s.frame.cmds.push(RenderCmd::FillRect { rect: tr, color_key: key as u64, wireframe: wire_once });
+                            if s.diagnostics.last_warning.is_none() {
+                                let warn = if shapes_cache.is_tess_failed(key) {
+                                    "tri_fail"
                                 } else {
-                                    // Fallback: bounds rect.
-                                    s.frame.cmds.push(RenderCmd::FillRect { rect: tr, color_key: key as u64, wireframe: wire_once });
-                                    if s.diagnostics.last_warning.is_none() {
-                                        let warn = if shapes_cache.is_tess_failed(key) {
-                                            "tri_fail"
-                                        } else {
-                                            "tri_miss"
-                                        };
-                                        s.diagnostics.last_warning = Some(warn.to_string());
-                                    }
-                                }
-                            } else if s.diagnostics.last_warning.is_none() {
-                                s.diagnostics.last_warning = Some("miss_shp".to_string());
+                                    "tri_miss"
+                                };
+                                s.diagnostics.last_warning = Some(warn.to_string());
                             }
                         }
-                        ShapeMode::Rect => {
-                            if let Some(b) = shapes_cache.get_bounds(key) {
-                                let rect = RectI { x: b.x + tx, y: b.y + ty, w: b.w, h: b.h };
-                                s.frame.cmds.push(RenderCmd::FillRect { rect, color_key: key as u64, wireframe: wire_once });
-                            } else if s.diagnostics.last_warning.is_none() {
-                                s.diagnostics.last_warning = Some("miss_shp".to_string());
-                            }
-                        }
+                    } else if s.diagnostics.last_warning.is_none() {
+                        s.diagnostics.last_warning = Some("miss_shp".to_string());
                     }
 
                     if s.dump_next_frame && i < 32 {

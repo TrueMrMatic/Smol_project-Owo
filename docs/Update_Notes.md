@@ -60,3 +60,30 @@ Theme: Bottom-screen UX rework + snapshot safety
 
 ## Risks / Watch-outs
 - If command dumps are needed, we will add a dedicated hotkey in a future patch.
+
+# Update Notes — PATCH_003_UI_Y_HARD_FIX
+
+Build ID: PATCH_003_UI_Y_HARD_FIX  
+Base: PATCH_002_UI_SNAPSHOT_SAFETY  
+Theme: Y snapshot hard-fix + remove rectangle mode + UI polish
+
+## Summary
+- Moved snapshot writes to a deferred queue flushed during the engine tick to avoid SD I/O on the input path.
+- Removed rectangle-only render mode; triangle rendering is now the sole path.
+- Tweaked the bottom-screen layout with a separator and simplified controls text.
+
+## Changed files
+- rust/bridge/src/runlog.rs
+- rust/bridge/src/engine/mod.rs
+- rust/bridge/src/ffi/exports.rs
+- rust/bridge/src/ruffle_adapter/threed_backend.rs
+- source/main.c
+- docs/Update_Notes.md
+- docs/Next_Step_Notes.md
+
+## Behavior changes
+- Pressing **Y** queues a snapshot; it is flushed asynchronously during ticks.
+- HUD no longer shows mode flags (mR/mT); only triangle rendering remains.
+
+## Risks / Watch-outs
+- Snapshot writes are rate-limited; if you press Y repeatedly, snapshots may be queued and flushed over time.

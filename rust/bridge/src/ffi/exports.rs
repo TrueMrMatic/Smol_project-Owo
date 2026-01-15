@@ -101,7 +101,7 @@ pub extern "C" fn bridge_write_status_snapshot_ctx(ctx: *mut BridgeContext) {
         return;
     }
     let ctx = unsafe { &mut *ctx };
-    ctx.engine.write_status_snapshot("user");
+    ctx.engine.request_status_snapshot("user");
 }
 
 
@@ -135,15 +135,6 @@ pub extern "C" fn bridge_get_status_text(ctx: *mut BridgeContext, out: *mut c_ch
     write_c_string(out, cap, &s)
 }
 
-
-#[no_mangle]
-pub extern "C" fn bridge_toggle_shape_mode_ctx(ctx: *mut BridgeContext) {
-    if ctx.is_null() {
-        return;
-    }
-    let ctx = unsafe { &mut *ctx };
-    ctx.engine.toggle_shape_mode();
-}
 
 #[no_mangle]
 pub extern "C" fn bridge_toggle_wireframe_once_ctx(ctx: *mut BridgeContext) {

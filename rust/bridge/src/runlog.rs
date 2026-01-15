@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BUILD_ID: &str = "PATCH_001_PROTOCOL_INIT_v2";
-const BASE_ID: &str = "BASELINE_000_BEFORE_BUG";
+const BUILD_ID: &str = "PATCH_003_UI_Y_HARD_FIX";
+const BASE_ID: &str = "PATCH_002_UI_SNAPSHOT_SAFETY";
 
 /// Flush policy:
 /// - Boottrace is buffered and flushed at most every ~250ms or when buffer grows large.
@@ -16,6 +16,7 @@ const BASE_ID: &str = "BASELINE_000_BEFORE_BUG";
 const FLUSH_MS: u64 = 250;
 const FORCE_FLUSH_MIN_MS: u64 = 50;
 const STAGE_FLUSH_MS: u64 = 250;
+const STATUS_FLUSH_MS: u64 = 200;
 const BOOTTRACE_BUF_MAX: usize = 2048;
 const CONSOLE_QUEUE_MAX: usize = 64;
 
@@ -33,6 +34,7 @@ struct RunLog {
     verbosity: u8, // 0=off, 1=important only, 2=verbose
 
     boottrace: BufWriter<std::fs::File>,
+    status: BufWriter<std::fs::File>,
     warnings: BufWriter<std::fs::File>,
 
     // buffered boottrace pending (reduces write calls)
@@ -44,6 +46,10 @@ struct RunLog {
     last_stage: String,
     last_stage_frame: u64,
     last_stage_flush_ms: u64,
+
+    // deferred status snapshots to avoid blocking input/UI
+    status_q: VecDeque<String>,
+    last_status_flush_ms: u64,
 
     // console ring buffer of important lines for C HUD
     console_q: VecDeque<String>,
@@ -115,6 +121,7 @@ pub fn init_for_swf(root_path: &str) {
     let warnings_path = format!("{}/warnings.txt", run_dir);
 
     let boottrace_file = open_append(&boottrace_path).unwrap();
+    let status_file = open_append(&status_path).unwrap();
     let warnings_file = open_append(&warnings_path).unwrap();
 
     let mut rl = RunLog {
@@ -126,6 +133,7 @@ pub fn init_for_swf(root_path: &str) {
         seq: 0,
         verbosity: 1,
         boottrace: BufWriter::new(boottrace_file),
+        status: BufWriter::new(status_file),
         warnings: BufWriter::new(warnings_file),
         bt_buf: String::new(),
         last_flush_ms: 0,
@@ -133,6 +141,8 @@ pub fn init_for_swf(root_path: &str) {
         last_stage: "init".to_string(),
         last_stage_frame: 0,
         last_stage_flush_ms: 0,
+        status_q: VecDeque::new(),
+        last_status_flush_ms: 0,
         console_q: VecDeque::new(),
     };
 
@@ -253,14 +263,34 @@ pub fn stage(stage: &str, frame: u64) {
 pub fn status_snapshot(text: &str) {
     if let Some(lock) = RUNLOG.get() {
         if let Ok(mut rl) = lock.lock() {
-            // Append snapshot line
-            if let Some(mut f) = open_append(&rl.status_path) {
+            if rl.status_q.len() < 16 {
+                rl.status_q.push_back(text.to_string());
+            } else {
+                rl.status_q.pop_front();
+                rl.status_q.push_back(text.to_string());
+            }
+        }
+    }
+}
+
+/// Flush deferred status snapshots without blocking input/UI.
+pub fn tick() {
+    if let Some(lock) = RUNLOG.get() {
+        if let Ok(mut rl) = lock.lock() {
+            let now = now_ms();
+            if rl.status_q.is_empty() {
+                return;
+            }
+            if now.saturating_sub(rl.last_status_flush_ms) < STATUS_FLUSH_MS {
+                return;
+            }
+            if let Some(text) = rl.status_q.pop_front() {
                 rl.seq = rl.seq.wrapping_add(1);
                 let line = format!("[{:06}] {}\n", rl.seq, text);
-                let _ = f.write_all(line.as_bytes());
-                let _ = f.flush();
+                let _ = rl.status.write_all(line.as_bytes());
+                let _ = rl.status.flush();
+                rl.last_status_flush_ms = now;
             }
-            log_important("status_snapshot written");
         }
     }
 }
@@ -332,6 +362,12 @@ pub fn shutdown() {
     if let Some(lock) = RUNLOG.get() {
         if let Ok(mut rl) = lock.lock() {
             maybe_flush(&mut rl, true);
+            while let Some(text) = rl.status_q.pop_front() {
+                rl.seq = rl.seq.wrapping_add(1);
+                let line = format!("[{:06}] {}\n", rl.seq, text);
+                let _ = rl.status.write_all(line.as_bytes());
+            }
+            let _ = rl.status.flush();
             let _ = rl.warnings.flush();
             maybe_flush_stage(&mut rl, true);
         }
