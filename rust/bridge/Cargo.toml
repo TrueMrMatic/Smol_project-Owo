@@ -1,0 +1,31 @@
+[package]
+name = "bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# Ruffle crates
+# Pinned to a known nightly tag for API stability.
+#
+# Why: Upstream changes have already broken this project (Bitmap dims accessors, DrawPath layout).
+# Pinning stabilizes development and lets us progressively replace Debug-based parsing with real
+# command inspection.
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", tag = "nightly-2025-12-27", default-features = false }
+ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", tag = "nightly-2025-12-27" }
+ruffle_video = { git = "https://github.com/ruffle-rs/ruffle", tag = "nightly-2025-12-27" }
+
+# Used at shape registration time to triangulate polygons-with-holes (fills only).
+earcutr = "0.4"
+
+# Dependencies for the Backend
+url = "2.5"
+indexmap = "2.2"
+async-channel = "2.3"
+log = "0.4"
+encoding_rs = "0.8"
+
+# For parsing CWS (zlib-compressed) SWFs to extract SetBackgroundColor.
+miniz_oxide = "0.8"
