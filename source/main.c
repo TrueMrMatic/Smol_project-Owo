@@ -42,12 +42,12 @@ static void clear_top_black_double(void) {
 #define UI_ROW_SWF 2
 #define UI_ROW_SEPARATOR 3
 #define UI_ROW_CONTROLS 4
-#define UI_ROW_LOG_LABEL 9
-#define UI_ROW_LOG_START 10
+#define UI_ROW_LOG_LABEL 10
+#define UI_ROW_LOG_START 11
 #define UI_LOG_LINES 16
-#define UI_ROW_NOTICE 26
-#define UI_ROW_WARN 27
-#define UI_ROW_HUD 28
+#define UI_ROW_NOTICE 27
+#define UI_ROW_WARN 28
+#define UI_ROW_HUD 29
 
 static const char* path_basename(const char* path) {
     const char* last = path;
@@ -69,9 +69,10 @@ static void ui_draw_static(const char* swf_path) {
     printf("\x1b[%d;0H========================================", UI_ROW_SEPARATOR);
     printf("\x1b[%d;0HControls:", UI_ROW_CONTROLS);
     printf("\x1b[%d;0H  L: wireframe (hold)", UI_ROW_CONTROLS + 1);
-    printf("\x1b[%d;0H  Y: write snapshot", UI_ROW_CONTROLS + 2);
-    printf("\x1b[%d;0H  B: back", UI_ROW_CONTROLS + 3);
-    printf("\x1b[%d;0H  START: exit app", UI_ROW_CONTROLS + 4);
+    printf("\x1b[%d;0H  Y: write diag snapshot", UI_ROW_CONTROLS + 2);
+    printf("\x1b[%d;0H  X: dump frame cmds", UI_ROW_CONTROLS + 3);
+    printf("\x1b[%d;0H  B: back", UI_ROW_CONTROLS + 4);
+    printf("\x1b[%d;0H  START: exit app", UI_ROW_CONTROLS + 5);
     printf("\x1b[%d;0HLogs:", UI_ROW_LOG_LABEL);
     ui_clear_log_window();
 }
@@ -312,6 +313,10 @@ int main(int argc, char* argv[]) {
                 } else {
                     ui_set_notice("snapshot cooldown", 30);
                 }
+            }
+            if (down & KEY_X) {
+                bridge_request_command_dump_ctx(ctx);
+                ui_set_notice("frame dump requested", 60);
             }
 
             // Tick+Render

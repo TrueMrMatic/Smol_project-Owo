@@ -22,6 +22,11 @@ Current keys:
 - Supports a minimal subset of shape drawing (bounds rectangles and/or triangle fill meshes depending on mode).
 - Not feature-complete: strokes, gradients, bitmaps, text, masks, blend modes, filters are incomplete or missing.
 
+## Debug controls
+- **Y**: write a multi-line diagnostic snapshot (last stage, cache stats, draw stats, recent warnings).
+- **X**: request a one-shot command dump for the next frame (for correlating command lists).
+- **L (hold)**: wireframe overlay for triangle edges.
+
 ## Roadmap to a practical Flash renderer on 3DS
 The goal is not perfect fidelity first; it's **robustness** + **incremental coverage**.
 
