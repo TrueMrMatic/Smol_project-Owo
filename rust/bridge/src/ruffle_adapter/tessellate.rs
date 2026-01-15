@@ -9,7 +9,7 @@
 use crate::render::cache::shapes::{FillMesh, StrokeMesh, Vertex2};
 use crate::runlog;
 use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath, FillRule};
-use swf::{FillStyle, LineJoinStyle};
+use ruffle_core::swf::{FillStyle, LineJoinStyle};
 
 // We use earcut for robust polygon-with-holes triangulation.
 // This runs at registration time, so the CPU cost is acceptable.

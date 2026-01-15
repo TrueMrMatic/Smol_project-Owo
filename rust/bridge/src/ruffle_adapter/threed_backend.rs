@@ -26,13 +26,13 @@ use ruffle_render::bitmap::{Bitmap, BitmapHandle, SyncHandle, BitmapSource, Pixe
 use ruffle_render::commands::{CommandList, Command};
 use ruffle_render::error::Error as RenderError;
 use ruffle_render::quality::StageQuality;
-use ruffle_render::shape_utils::DistilledShape;
+use ruffle_render::shape_utils::{DistilledShape, DrawPath};
 use ruffle_render::pixel_bender::{PixelBenderShader, PixelBenderShaderHandle};
 use ruffle_render::pixel_bender_support::PixelBenderShaderArgument;
 
 use crate::render::{ColorTransform, FramePacket, Matrix2D, RenderCmd, RectI, SharedCaches, TexUvRect};
 use crate::render::cache::bitmaps::BitmapSurface;
-use swf::ColorTransform as SwfColorTransform;
+use ruffle_core::swf::ColorTransform as SwfColorTransform;
 
 // Step 2A tessellator lives next to this backend inside ruffle_adapter/.
 use super::tessellate;

@@ -4,7 +4,7 @@ mod executor;
 mod frame;
 mod shared;
 
-pub use frame::{FramePacket, RenderCmd, RectI};
+pub use frame::{ColorTransform, FramePacket, Matrix2D, RenderCmd, RectI, TexUvRect};
 pub use shared::SharedCaches;
 
 use crate::render::device::fb3ds::Fb3dsDevice;
