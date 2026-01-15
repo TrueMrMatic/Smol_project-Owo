@@ -1,6 +1,6 @@
 pub mod fb3ds;
 
-use crate::render::frame::{ClearColor, ColorTransform, RectI, TexVertex};
+use crate::render::frame::{ClearColor, ColorTransform, Matrix2D, RectI, TexVertex};
 use crate::render::cache::bitmaps::BitmapSurface;
 use crate::render::cache::shapes::Vertex2;
 
@@ -45,6 +45,51 @@ pub trait RenderDevice {
     /// Optional debug: draw triangle edges (wireframe).
     fn draw_tris_wireframe(&mut self, verts: &[Vertex2], indices: &[u16], tx: i32, ty: i32, r: u8, g: u8, b: u8);
 
+    /// Fill a set of triangles with an opaque solid color and an affine transform.
+    ///
+    /// The default implementation fast-paths translation-only matrices.
+    fn fill_tris_solid_affine(
+        &mut self,
+        verts: &[Vertex2],
+        indices: &[u16],
+        transform: Matrix2D,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) {
+        if transform.is_translation() {
+            let tx = transform.tx.round() as i32;
+            let ty = transform.ty.round() as i32;
+            self.fill_tris_solid(verts, indices, tx, ty, r, g, b);
+        } else {
+            let tx = transform.tx.round() as i32;
+            let ty = transform.ty.round() as i32;
+            self.fill_tris_solid(verts, indices, tx, ty, r, g, b);
+        }
+    }
+
+    /// Optional debug: draw triangle edges (wireframe) with an affine transform.
+    ///
+    /// The default implementation fast-paths translation-only matrices.
+    fn draw_tris_wireframe_affine(
+        &mut self,
+        verts: &[Vertex2],
+        indices: &[u16],
+        transform: Matrix2D,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) {
+        if transform.is_translation() {
+            let tx = transform.tx.round() as i32;
+            let ty = transform.ty.round() as i32;
+            self.draw_tris_wireframe(verts, indices, tx, ty, r, g, b);
+        } else {
+            let tx = transform.tx.round() as i32;
+            let ty = transform.ty.round() as i32;
+            self.draw_tris_wireframe(verts, indices, tx, ty, r, g, b);
+        }
+    }
 
     /// Called at the beginning of each frame.
     fn begin_frame(&mut self);
