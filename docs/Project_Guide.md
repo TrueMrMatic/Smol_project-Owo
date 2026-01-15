@@ -10,6 +10,13 @@ This guide is intentionally **renderer-focused** for now. Other subsystems (audi
 3. Any new heavy behavior must be **toggleable at runtime** via an SD config file or build flag.
 4. All runs must emit a **run bundle** under `sdmc:/flash/_runs/<BUILD_ID>/<SWF_NAME>/`.
 
+### Runtime config
+Runtime toggles live in `sdmc:/flash/renderer.cfg` (simple `key=value` lines).
+
+Current keys:
+- `textured_bitmaps=1|0` — enable/disable transformed bitmap rendering.
+- `masks_enabled=1|0` — enable/disable mask scissor application.
+
 ## Current renderer status
 - Displays basic frames via a `CommandList` emitted from Ruffle to the 3DS backend.
 - Supports a minimal subset of shape drawing (bounds rectangles and/or triangle fill meshes depending on mode).
@@ -51,4 +58,3 @@ The goal is not perfect fidelity first; it's **robustness** + **incremental cove
 - A reasonable set of real-world SWFs loads without freezing.
 - Missing features degrade gracefully (fallback), never hard-freeze.
 - Logs always allow pinpointing the stage and last processed item.
-

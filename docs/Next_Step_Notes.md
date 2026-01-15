@@ -1,34 +1,43 @@
-# Next Step Notes — for the next patch after PATCH_003_UI_Y_HARD_FIX
+# Next Step Notes — for the next patch after PATCH_009_MASKS
 
-You are continuing from PATCH_003_UI_Y_HARD_FIX on top of PATCH_002_UI_SNAPSHOT_SAFETY.
+You are continuing from PATCH_009_MASKS on top of PATCH_008_TEXT_VECTOR.
 
 ## Current state
-- Run logging + SD run bundles are in place with low overhead.
-- Bottom screen shows controls, a fixed log window, a notice line, and HUD status.
-- Snapshot hotkey (Y) queues an async snapshot flush to avoid input-path stalls.
-- Rectangle render mode is removed; triangles are the only path.
+- Run bundles and LAST_RUN pointers are flash-only (`sdmc:/flash/_runs/...`).
+- Runlog verbosity is locked to 2; no runtime toggle remains in the UI.
+- Rectangle mode is removed; triangles are the only path, with improved fill winding for complex shapes.
+- Bounds fallbacks are now counted/logged so missing mesh cases are visible.
+- Bitmap transforms now use a textured triangle path (toggleable via `sdmc:/flash/renderer.cfg`).
+- Strokes now tessellate into triangle strips with bounds-outline fallbacks.
+- Vector text is routed through dedicated text draw commands with bounds fallbacks.
+- Rect masks apply scissor clipping (toggleable via `masks_enabled`).
 
 ## Inputs you will receive
-- A run bundle zip from the user (copied from SD) containing boottrace/last_stage/warnings/status snapshots.
-- Or compile errors from `make`.
-- Possibly a SWF that fails.
+- A run bundle copied from `sdmc:/flash/_runs/...` with boottrace/last_stage/status snapshots.
+- Possibly a SWF that still looks “rectangular” due to missing renderer coverage.
 
 ## Next theme (ONLY ONE)
-Validate snapshot stability + collect run bundles from real hardware:
-- Confirm Y no longer crashes and run bundles are written reliably.
-- Verify the new bottom-screen UI remains stable across SWF loads.
-- Capture a run bundle for at least one heavy SWF.
+Renderer coverage expansion — move beyond bounds rectangles:
+1. **Shapes:** validate fill mesh coverage (reduce bounds fallbacks; inspect warnings).
+2. **Bitmaps:** validate textured bitmap coverage and confirm config toggle behavior.
+3. **Strokes:** validate stroke coverage and tune joins/caps as needed.
+4. **Text:** render static text (vector glyphs or bitmap atlas).
+5. **Masks:** basic clip masks (rect + simple shape masks) with safe fallbacks.
 
 ## Acceptance criteria
-- Y snapshot never crashes and always creates a `status_snapshot` entry.
-- The bottom-screen UI stays readable without scrolling/flicker during playback.
-- A run bundle from hardware is available for analysis.
+- Complex vector shapes render as triangles, not bounds rectangles.
+- Bitmap fills render with transforms (no more unscaled blits only).
+- Stroked outlines appear for common artwork (constant width at minimum).
+- Static text is visible (even if using a single-font or atlas fallback).
+- Masked content clips correctly in at least rect masks; unsupported masks degrade gracefully.
 
 ## Implementation checklist
-- Confirm UI lines are stable and no long prints cause scroll.
-- Ensure snapshot cooldown feedback is visible.
-- Make sure run bundle paths still match `SD_Run_Artifacts.md`.
+- Inspect bounds fallback warnings and confirm fill meshes exist for common shapes.
+- Extend render commands to carry bitmap transforms + UVs and add textured-triangle draw path.
+- Add stroke meshes to the shape cache and draw them after fills.
+- Choose a single text pipeline (vector glyphs or bitmap atlas) and implement minimal coverage.
+- Add mask push/pop commands and a safe scissor-based fallback.
 
 ## Out of scope
-- Do NOT add new rendering features in the same patch.
-- Do NOT change runlog formats unless necessary.
+- Audio, AVM work, or non-renderer refactors.
+- Unbounded work or per-frame allocations in the render path.

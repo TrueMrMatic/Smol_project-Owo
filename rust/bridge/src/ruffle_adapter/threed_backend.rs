@@ -26,12 +26,13 @@ use ruffle_render::bitmap::{Bitmap, BitmapHandle, SyncHandle, BitmapSource, Pixe
 use ruffle_render::commands::{CommandList, Command};
 use ruffle_render::error::Error as RenderError;
 use ruffle_render::quality::StageQuality;
-use ruffle_render::shape_utils::DistilledShape;
+use ruffle_render::shape_utils::{DistilledShape, DrawPath};
 use ruffle_render::pixel_bender::{PixelBenderShader, PixelBenderShaderHandle};
 use ruffle_render::pixel_bender_support::PixelBenderShaderArgument;
 
-use crate::render::{FramePacket, RenderCmd, RectI, SharedCaches};
+use crate::render::{ColorTransform, FramePacket, Matrix2D, RenderCmd, RectI, SharedCaches, TexUvRect};
 use crate::render::cache::bitmaps::BitmapSurface;
+use ruffle_core::swf::ColorTransform as SwfColorTransform;
 
 // Step 2A tessellator lives next to this backend inside ruffle_adapter/.
 use super::tessellate;
@@ -39,6 +40,38 @@ use crate::runlog;
 type ShapeKey = usize;
 
 const MAX_TRIS_PER_FRAME: u32 = 8000;
+
+fn to_color_transform(ct: SwfColorTransform) -> Option<ColorTransform> {
+    if ct == SwfColorTransform::IDENTITY {
+        return None;
+    }
+    let mul = ct.mult_rgba_normalized();
+    let add_norm = ct.add_rgba_normalized();
+    Some(ColorTransform {
+        mul,
+        add: [
+            add_norm[0] * 255.0,
+            add_norm[1] * 255.0,
+            add_norm[2] * 255.0,
+            add_norm[3] * 255.0,
+        ],
+    })
+}
+
+fn debug_color_from_key(mut k: u64) -> (u8, u8, u8) {
+    k = k.wrapping_mul(0x9E3779B185EBCA87);
+    k ^= k >> 33;
+    k = k.wrapping_mul(0xC2B2AE3D27D4EB4F);
+    k ^= k >> 29;
+    let r = (k & 0xFF) as u8;
+    let g = ((k >> 8) & 0xFF) as u8;
+    let b = ((k >> 16) & 0xFF) as u8;
+    (r, g, b)
+}
+
+fn is_text_shape(shape: &DistilledShape<'_>) -> bool {
+    shape.id == 0 && shape.paths.iter().all(|p| matches!(p, DrawPath::Fill { .. }))
+}
 
 fn bitmap_to_surface(bitmap: Bitmap) -> BitmapSurface {
     // Ruffle's Bitmap is expected to carry uncompressed RGBA8 pixels.
@@ -278,30 +311,49 @@ impl RenderBackend for ThreeDSBackend {
             runlog::log_line(&format!("register_shape begin id={} b={} {} {} {}", id, bounds.x, bounds.y, bounds.w, bounds.h));
         }
 
-        match tessellate::tessellate_fills(&shape) {
-            Ok(res) if !res.fills.is_empty() => {
-                self.caches
-                    .shapes
-                    .lock()
-                    .unwrap()
-                    .insert_fill_meshes(key, bounds, res.fills, res.any_failed);
-                if runlog::is_verbose() {
-                    runlog::log_line(&format!("tessellate_fills ok id={} any_failed={}", id, res.any_failed));
-                }
-                runlog::stage(&format!("register_shape id={} done", id), 0);
+        let (fills, fill_failed, fill_partial) = match tessellate::tessellate_fills(&shape) {
+            Ok(res) => (res.fills, false, res.any_failed),
+            Err(tessellate::TessError::NoContours) => (Vec::new(), false, false),
+            Err(_) => (Vec::new(), true, false),
+        };
+        let (strokes, stroke_failed, stroke_partial) = match tessellate::tessellate_strokes(&shape) {
+            Ok(res) => (res.strokes, false, res.any_failed),
+            Err(tessellate::TessError::NoContours) => (Vec::new(), false, false),
+            Err(_) => (Vec::new(), true, false),
+        };
+
+        let text_shape = is_text_shape(&shape);
+
+        self.caches.shapes.lock().unwrap().insert_meshes(
+            key,
+            bounds,
+            fills,
+            fill_failed,
+            fill_partial,
+            strokes,
+            stroke_failed,
+            stroke_partial,
+            text_shape,
+        );
+
+        if fill_failed {
+            if runlog::is_verbose() {
+                runlog::warn_line(&format!("tessellate_fills fallback_bounds id={}", id));
+            } else if (id % 25) == 0 {
+                runlog::log_important(&format!("tessellate_fills fallback_bounds id={} (sampled)", id));
             }
-            _ => {
-                self.caches.shapes.lock().unwrap().insert_bounds_failed(key, bounds);
-                // Important: some SWFs contain shapes we can't tessellate yet. Keep running.
-                // Log lightly by default to preserve loading FPS.
-                if runlog::is_verbose() {
-                    runlog::warn_line(&format!("tessellate_fills fallback_bounds id={}", id));
-                } else if (id % 25) == 0 {
-                    runlog::log_important(&format!("tessellate_fills fallback_bounds id={} (sampled)", id));
-                }
-                runlog::stage(&format!("register_shape id={} fallback_bounds", id), 0);
-            }
+            runlog::stage(&format!("register_shape id={} fill_fallback_bounds", id), 0);
+        } else if runlog::is_verbose() {
+            runlog::log_line(&format!("tessellate_fills ok id={} any_failed={}", id, fill_partial));
         }
+
+        if stroke_failed && runlog::is_verbose() {
+            runlog::warn_line(&format!("tessellate_strokes fallback_bounds id={}", id));
+        } else if stroke_partial && runlog::is_verbose() {
+            runlog::log_line(&format!("tessellate_strokes partial id={}", id));
+        }
+
+        runlog::stage(&format!("register_shape id={} done", id), 0);
 
         let mut s = self.shared.lock().unwrap();
         s.diagnostics.shapes_registered = s.diagnostics.shapes_registered.saturating_add(1);
@@ -330,9 +382,74 @@ impl RenderBackend for ThreeDSBackend {
             println!("[3DS] submit_frame: {} commands", commands.commands.len());
         }
 
+        let mut mask_pending_rect: Option<RectI> = None;
+        let mut mask_mode = false;
+
         for (i, cmd) in commands.commands.iter().enumerate() {
             total = total.saturating_add(1);
             match cmd {
+                Command::PushMask => {
+                    mask_mode = true;
+                    mask_pending_rect = None;
+                    other = other.saturating_add(1);
+                    if s.dump_next_frame && i < 32 {
+                        println!("  {i}: PushMask");
+                    }
+                }
+                Command::ActivateMask => {
+                    if let Some(rect) = mask_pending_rect.take() {
+                        s.frame.cmds.push(RenderCmd::PushMaskRect { rect });
+                    } else {
+                        runlog::warn_line("mask activate without rect; ignoring");
+                    }
+                    mask_mode = false;
+                    other = other.saturating_add(1);
+                    if s.dump_next_frame && i < 32 {
+                        println!("  {i}: ActivateMask");
+                    }
+                }
+                Command::DeactivateMask => {
+                    mask_mode = false;
+                    other = other.saturating_add(1);
+                    if s.dump_next_frame && i < 32 {
+                        println!("  {i}: DeactivateMask");
+                    }
+                }
+                Command::PopMask => {
+                    s.frame.cmds.push(RenderCmd::PopMask);
+                    other = other.saturating_add(1);
+                    if s.dump_next_frame && i < 32 {
+                        println!("  {i}: PopMask");
+                    }
+                }
+                Command::DrawRect { matrix, .. } => {
+                    if mask_mode {
+                        let axis_aligned = matrix.b == 0.0 && matrix.c == 0.0;
+                        if axis_aligned {
+                            // DrawRect uses a unit rect; scale by 1.0 then apply translation.
+                            let x = matrix.tx.to_pixels() as i32;
+                            let y = matrix.ty.to_pixels() as i32;
+                            let w = matrix.a.abs().round() as i32;
+                            let h = matrix.d.abs().round() as i32;
+                            if w > 0 && h > 0 {
+                                mask_pending_rect = Some(RectI { x, y, w, h });
+                            } else {
+                                runlog::warn_line("mask rect has zero size; ignoring");
+                            }
+                        } else {
+                            runlog::warn_line("non-axis-aligned mask rect unsupported; ignoring");
+                        }
+                        other = other.saturating_add(1);
+                        if s.dump_next_frame && i < 32 {
+                            println!("  {i}: DrawRect(mask)");
+                        }
+                    } else {
+                        other = other.saturating_add(1);
+                        if s.dump_next_frame && i < 32 {
+                            println!("  {i}: DrawRect");
+                        }
+                    }
+                }
                 Command::RenderShape { shape, transform, .. } => {
                     shapes = shapes.saturating_add(1);
                     s.seen_real_draw = true;
@@ -349,6 +466,7 @@ impl RenderBackend for ThreeDSBackend {
                             continue;
                         }
 
+                        let is_text = shapes_cache.is_text_shape(key);
                         if shapes_cache.has_mesh(key) {
                             let shape_tris = shapes_cache.get_total_tri_count(key);
                             if shape_tris > tris_budget {
@@ -363,17 +481,47 @@ impl RenderBackend for ThreeDSBackend {
                                 continue;
                             }
                             let fill_count = shapes_cache.fill_count(key);
+                            if fill_count == 0 {
+                                if is_text {
+                                    s.frame.cmds.push(RenderCmd::DrawTextSolidFill {
+                                        shape_key: key,
+                                        fill_idx: 0,
+                                        tx,
+                                        ty,
+                                        color_key: key as u64,
+                                        wireframe: wire_once,
+                                    });
+                                } else {
+                                    s.frame.cmds.push(RenderCmd::FillRect { rect: tr, color_key: key as u64, wireframe: wire_once });
+                                }
+                                if s.diagnostics.last_warning.is_none() {
+                                    s.diagnostics.last_warning = Some("tri_miss".to_string());
+                                }
+                                runlog::warn_line(&format!("shape_fill_missing key={}", key));
+                                continue;
+                            }
                             // Emit one draw cmd per fill mesh.
                             for fi in 0..fill_count {
                                 let color_key = (key as u64) ^ ((fi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                                s.frame.cmds.push(RenderCmd::DrawShapeSolidFill {
-                                    shape_key: key,
-                                    fill_idx: fi as u16,
-                                    tx,
-                                    ty,
-                                    color_key,
-                                    wireframe: wire_once,
-                                });
+                                if is_text {
+                                    s.frame.cmds.push(RenderCmd::DrawTextSolidFill {
+                                        shape_key: key,
+                                        fill_idx: fi as u16,
+                                        tx,
+                                        ty,
+                                        color_key,
+                                        wireframe: wire_once,
+                                    });
+                                } else {
+                                    s.frame.cmds.push(RenderCmd::DrawShapeSolidFill {
+                                        shape_key: key,
+                                        fill_idx: fi as u16,
+                                        tx,
+                                        ty,
+                                        color_key,
+                                        wireframe: wire_once,
+                                    });
+                                }
                             }
                             s.diagnostics.last_tris = s.diagnostics.last_tris.saturating_add(
                                 shapes_cache.get_total_tri_count(key),
@@ -395,6 +543,45 @@ impl RenderBackend for ThreeDSBackend {
                                 s.diagnostics.last_warning = Some(warn.to_string());
                             }
                         }
+
+                        let stroke_count = shapes_cache.stroke_count(key);
+                        if stroke_count > 0 {
+                            for si in 0..stroke_count {
+                                let color = shapes_cache
+                                    .get_stroke_mesh(key, si)
+                                    .map(|s| (s.r, s.g, s.b))
+                                    .unwrap_or((255, 255, 255));
+                                s.frame.cmds.push(RenderCmd::DrawShapeStroke {
+                                    shape_key: key,
+                                    stroke_idx: si as u16,
+                                    tx,
+                                    ty,
+                                    r: color.0,
+                                    g: color.1,
+                                    b: color.2,
+                                    wireframe: wire_once,
+                                });
+                            }
+                            if shapes_cache.is_stroke_partial(key) && s.diagnostics.last_warning.is_none() {
+                                s.diagnostics.last_warning = Some("str_part".to_string());
+                            }
+                        } else if shapes_cache.is_stroke_failed(key) {
+                            let color_key = (key as u64) ^ 0xA5A5_5A5A_F0F0_0F0F;
+                            let (r, g, b) = debug_color_from_key(color_key);
+                            s.frame.cmds.push(RenderCmd::DrawShapeStroke {
+                                shape_key: key,
+                                stroke_idx: 0,
+                                tx,
+                                ty,
+                                r,
+                                g,
+                                b,
+                                wireframe: wire_once,
+                            });
+                            if s.diagnostics.last_warning.is_none() {
+                                s.diagnostics.last_warning = Some("str_fail".to_string());
+                            }
+                        }
                     } else if s.diagnostics.last_warning.is_none() {
                         s.diagnostics.last_warning = Some("miss_shp".to_string());
                     }
@@ -408,12 +595,26 @@ impl RenderBackend for ThreeDSBackend {
                     s.seen_real_draw = true;
 
                     let key = Arc::as_ptr(&bitmap.0) as *const () as usize;
-                    let tx = transform.matrix.tx.to_pixels() as i32;
-                    let ty = transform.matrix.ty.to_pixels() as i32;
+                    let tx = transform.matrix.tx.to_pixels() as f32;
+                    let ty = transform.matrix.ty.to_pixels() as f32;
+                    let matrix = Matrix2D {
+                        a: transform.matrix.a,
+                        b: transform.matrix.b,
+                        c: transform.matrix.c,
+                        d: transform.matrix.d,
+                        tx,
+                        ty,
+                    };
+                    let color_transform = to_color_transform(transform.color_transform);
 
                     // Only push a blit if the bitmap exists; otherwise keep a short warning.
                     if self.caches.bitmaps.lock().unwrap().contains_key(key) {
-                        s.frame.cmds.push(RenderCmd::BlitBitmap { x: tx, y: ty, bitmap_key: key });
+                        s.frame.cmds.push(RenderCmd::BlitBitmap {
+                            bitmap_key: key,
+                            transform: matrix,
+                            uv: TexUvRect::full(),
+                            color_transform,
+                        });
                     } else if s.diagnostics.last_warning.is_none() {
                         s.diagnostics.last_warning = Some("miss_bmp".to_string());
                     }

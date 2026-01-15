@@ -16,7 +16,6 @@ void  bridge_write_status_snapshot_ctx(void* ctx);
 
 // Renderer controls (exported by Rust)
 u32   bridge_runlog_drain(char* out, u32 out_len);
-void  bridge_runlog_cycle_verbosity(void);
 void   bridge_print_status(void* ctx);
 void   bridge_request_command_dump_ctx(void* ctx);
 void   bridge_toggle_wireframe_once_ctx(void* ctx);
@@ -71,7 +70,7 @@ static void ui_draw_static(const char* swf_path) {
     printf("\x1b[%d;0HControls:", UI_ROW_CONTROLS);
     printf("\x1b[%d;0H  L: wireframe (hold)", UI_ROW_CONTROLS + 1);
     printf("\x1b[%d;0H  Y: write snapshot", UI_ROW_CONTROLS + 2);
-    printf("\x1b[%d;0H  SELECT: verbosity  B: back", UI_ROW_CONTROLS + 3);
+    printf("\x1b[%d;0H  B: back", UI_ROW_CONTROLS + 3);
     printf("\x1b[%d;0H  START: exit app", UI_ROW_CONTROLS + 4);
     printf("\x1b[%d;0HLogs:", UI_ROW_LOG_LABEL);
     ui_clear_log_window();
@@ -299,10 +298,6 @@ int main(int argc, char* argv[]) {
                 bridge_player_destroy(ctx);
                 clear_top_black_double();
                 break;
-            }
-
-            if (down & KEY_SELECT) {
-                bridge_runlog_cycle_verbosity();
             }
 
             // Hold L to show triangle edges continuously.
