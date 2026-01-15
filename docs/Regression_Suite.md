@@ -11,6 +11,7 @@ Because the test SWFs are user-provided and not curated, we use a pragmatic suit
 ## For each SWF in user's usual order
 - Run for 60 seconds (or until the first rendered frame).
 - Press **Y** once during loading to create a `status_snapshot` entry.
+- Optionally press **X** once to request a one-frame command dump.
 - If a freeze happens, power-cycle and preserve the run bundle.
 
 ## Must-not-regress for redkanga

@@ -11,6 +11,8 @@ You are continuing from PATCH_009_MASKS on top of PATCH_008_TEXT_VECTOR.
 - Strokes now tessellate into triangle strips with bounds-outline fallbacks.
 - Vector text is routed through dedicated text draw commands with bounds fallbacks.
 - Rect masks apply scissor clipping (toggleable via `masks_enabled`).
+- Run logs reinitialize per SWF and snapshots now include last stage, cache stats, draw stats, and recent warnings.
+- X triggers a one-frame command dump to correlate command lists with draw stats.
 
 ## Inputs you will receive
 - A run bundle copied from `sdmc:/flash/_runs/...` with boottrace/last_stage/status snapshots.

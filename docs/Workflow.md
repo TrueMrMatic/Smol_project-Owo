@@ -23,8 +23,9 @@ This project is optimized for **tight hardware feedback loops** on a constrained
 1. Copy the `.3dsx` to the SD card.
 2. Launch and select the SWF.
 3. During loading, press **Y** once to write a status snapshot.
-4. Let it run for at least 60 seconds or until the first frame.
-5. If it freezes, power-cycle, then preserve the run bundle.
+4. (Optional) Press **X** once to request a one-frame command dump for correlation.
+5. Let it run for at least 60 seconds or until the first frame.
+6. If it freezes, power-cycle, then preserve the run bundle.
 
 ## Reporting back
 Provide:
@@ -40,4 +41,3 @@ Did it freeze? (Y/N)
 Time to first frame:
 Notes:
 ```
-

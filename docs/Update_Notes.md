@@ -198,6 +198,45 @@ Theme: Stroke tessellation + fallback visibility
 ## Risks / Watch-outs
 - Miter joins can spike width on sharp angles; check logs if you see large stroke artifacts.
 
+# Update Notes — PATCH_009_MASKS
+
+Build ID: PATCH_009_MASKS  
+Base: PATCH_008_TEXT_VECTOR  
+Theme: Logging fidelity + diagnostics + runtime debug controls
+
+## Summary
+- Run bundles now reinitialize per SWF; switching files writes to the correct folder and resumes if the same SWF is reopened.
+- Heartbeat logs are time-throttled (~30s) to reduce SD churn.
+- Shape registration logs include per-shape summaries (bounds, fill/stroke counts, triangle totals, tessellation flags, text flag).
+- Tessellation failures now report explicit reasons and counts (caps, earcut failures, no contours).
+- Draw-time instrumentation tracks mesh triangles, rect fast-path usage, and bounds fallbacks.
+- Y snapshots now emit multi-line diagnostic snapshots including last stage, cache stats, and recent warnings.
+- X triggers a one-shot command dump for correlating command lists with mesh usage.
+
+## Changed files
+- rust/bridge/src/runlog.rs
+- rust/bridge/src/engine/mod.rs
+- rust/bridge/src/ruffle_adapter/tessellate.rs
+- rust/bridge/src/ruffle_adapter/threed_backend.rs
+- rust/bridge/src/render/executor.rs
+- rust/bridge/src/render/mod.rs
+- source/main.c
+- docs/Update_Notes.md
+- docs/Next_Step_Notes.md
+- docs/Project_Guide.md
+- docs/SD_Run_Artifacts.md
+- docs/Workflow.md
+- docs/Regression_Suite.md
+- docs/Architecture.md
+
+## Behavior changes
+- Run logs are isolated per SWF under `sdmc:/flash/_runs/PATCH_009_MASKS/<SWF_NAME>/`.
+- Y writes a multi-line diagnostic snapshot (last stage, cache stats, draw stats, recent warnings).
+- X requests a one-frame command dump to the run log.
+
+## Risks / Watch-outs
+- Verbose shape summaries can grow boottrace quickly on SWFs with many shapes.
+
 # Update Notes — PATCH_008_TEXT_VECTOR
 
 Build ID: PATCH_008_TEXT_VECTOR  

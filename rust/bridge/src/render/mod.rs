@@ -1,6 +1,6 @@
 pub mod cache;
 pub mod device;
-mod executor;
+pub(crate) mod executor;
 mod frame;
 mod shared;
 

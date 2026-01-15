@@ -13,6 +13,17 @@ static TEXTURE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static STROKE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static TEXT_MESH_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static MASK_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
+static FRAME_COUNTER: AtomicU32 = AtomicU32::new(0);
+static FILL_DRAW_COUNT: AtomicU32 = AtomicU32::new(0);
+static FILL_FALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
+static TEXT_DRAW_COUNT: AtomicU32 = AtomicU32::new(0);
+static TEXT_FALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
+static STROKE_DRAW_COUNT: AtomicU32 = AtomicU32::new(0);
+static STROKE_FALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
+static LAST_MESH_TRIS: AtomicU32 = AtomicU32::new(0);
+static LAST_RECT_FASTPATH: AtomicU32 = AtomicU32::new(0);
+static LAST_BOUNDS_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+const DRAW_SUMMARY_FRAMES: u32 = 1800;
 
 fn rect_intersects_surface(rect: RectI, sw: i32, sh: i32) -> bool {
     if rect.w <= 0 || rect.h <= 0 {
@@ -67,6 +78,10 @@ impl CommandExecutor {
         let shapes = caches.shapes.lock().unwrap();
         let mut mask_stack: Vec<RectI> = Vec::new();
 
+        let mut mesh_tris = 0u32;
+        let mut rect_fastpath = 0u32;
+        let mut bounds_fallbacks = 0u32;
+
         for cmd in &packet.cmds {
             match cmd {
                 RenderCmd::FillRect { rect, color_key, wireframe } => {
@@ -77,6 +92,7 @@ impl CommandExecutor {
                     }
                 }
                 RenderCmd::DrawShapeSolidFill { shape_key, fill_idx, tx, ty, color_key, wireframe } => {
+                    FILL_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
                     let (cr, cg, cb) = color_from_key(*color_key);
                     // Early reject by translated bounds (very common win for offscreen sprites).
                     if let Some(b) = shapes.get_bounds(*shape_key) {
@@ -95,12 +111,14 @@ impl CommandExecutor {
                         if indices_ok && verts_ok {
                             // Fast-path: common rect mesh is much faster to draw with `fill_rect`.
                             if let Some(local) = mesh_is_axis_aligned_rect(&mesh.verts, &mesh.indices) {
+                                rect_fastpath = rect_fastpath.saturating_add(1);
                                 let rect = RectI { x: local.x + *tx, y: local.y + *ty, w: local.w, h: local.h };
                                 device.fill_rect(rect, cr, cg, cb);
                                 if *wireframe {
                                     device.stroke_rect(rect, 255, 255, 255);
                                 }
                             } else {
+                                mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
                                 device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, cr, cg, cb);
                                 if *wireframe {
                                     device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
@@ -118,6 +136,7 @@ impl CommandExecutor {
                     }
 
                     if used_fallback {
+                        FILL_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
                         if missing_mesh || invalid_mesh {
                             let n = MESH_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
                             if n < 8 {
@@ -130,6 +149,7 @@ impl CommandExecutor {
                         }
                         if let Some(b) = shapes.get_bounds(*shape_key) {
                             shapes.record_bounds_fallback();
+                            bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             // Safe fallback: bounds rect.
                             let rect = RectI { x: b.x + *tx, y: b.y + *ty, w: b.w, h: b.h };
                             device.fill_rect(rect, cr, cg, cb);
@@ -140,6 +160,7 @@ impl CommandExecutor {
                     }
                 }
                 RenderCmd::DrawTextSolidFill { shape_key, fill_idx, tx, ty, color_key, wireframe } => {
+                    TEXT_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
                     let (cr, cg, cb) = color_from_key(*color_key);
                     let mut used_fallback = false;
                     let mut missing_mesh = false;
@@ -148,6 +169,7 @@ impl CommandExecutor {
                         let indices_ok = !mesh.indices.is_empty() && mesh.indices.len() % 3 == 0;
                         let verts_ok = !mesh.verts.is_empty();
                         if indices_ok && verts_ok {
+                            mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
                             device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, cr, cg, cb);
                             if *wireframe {
                                 device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
@@ -164,6 +186,7 @@ impl CommandExecutor {
                     }
 
                     if used_fallback {
+                        TEXT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
                         let n = TEXT_MESH_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
                         if n < 8 {
                             let kind = if missing_mesh { "missing_mesh" } else { "invalid_mesh" };
@@ -173,6 +196,7 @@ impl CommandExecutor {
                             ));
                         }
                         if let Some(b) = shapes.get_bounds(*shape_key) {
+                            bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             let rect = RectI { x: b.x + *tx, y: b.y + *ty, w: b.w, h: b.h };
                             device.fill_rect(rect, cr, cg, cb);
                             if *wireframe {
@@ -182,6 +206,7 @@ impl CommandExecutor {
                     }
                 }
                 RenderCmd::DrawShapeStroke { shape_key, stroke_idx, tx, ty, r, g, b, wireframe } => {
+                    STROKE_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
                     let mut used_fallback = false;
                     let mut missing_mesh = false;
                     let mut invalid_mesh = false;
@@ -189,6 +214,7 @@ impl CommandExecutor {
                         let indices_ok = !mesh.indices.is_empty() && mesh.indices.len() % 3 == 0;
                         let verts_ok = !mesh.verts.is_empty();
                         if indices_ok && verts_ok {
+                            mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
                             device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, *r, *g, *b);
                             if *wireframe {
                                 device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
@@ -205,6 +231,7 @@ impl CommandExecutor {
                     }
 
                     if used_fallback {
+                        STROKE_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
                         let n = STROKE_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
                         if n < 8 {
                             let kind = if missing_mesh { "missing_mesh" } else { "invalid_mesh" };
@@ -215,6 +242,7 @@ impl CommandExecutor {
                         }
                         if let Some(bnd) = shapes.get_bounds(*shape_key) {
                             shapes.record_stroke_bounds_fallback();
+                            bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             let rect = RectI { x: bnd.x + *tx, y: bnd.y + *ty, w: bnd.w, h: bnd.h };
                             device.stroke_rect(rect, *r, *g, *b);
                         }
@@ -338,6 +366,45 @@ impl CommandExecutor {
                 }
             }
         }
+
+        LAST_MESH_TRIS.store(mesh_tris, Ordering::Relaxed);
+        LAST_RECT_FASTPATH.store(rect_fastpath, Ordering::Relaxed);
+        LAST_BOUNDS_FALLBACKS.store(bounds_fallbacks, Ordering::Relaxed);
+
+        let frame = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        if runlog::is_verbose() && frame % DRAW_SUMMARY_FRAMES == 0 {
+            let fill_draws = FILL_DRAW_COUNT.swap(0, Ordering::Relaxed);
+            let fill_fallbacks = FILL_FALLBACK_COUNT.swap(0, Ordering::Relaxed);
+            let text_draws = TEXT_DRAW_COUNT.swap(0, Ordering::Relaxed);
+            let text_fallbacks = TEXT_FALLBACK_COUNT.swap(0, Ordering::Relaxed);
+            let stroke_draws = STROKE_DRAW_COUNT.swap(0, Ordering::Relaxed);
+            let stroke_fallbacks = STROKE_FALLBACK_COUNT.swap(0, Ordering::Relaxed);
+            runlog::log_line(&format!(
+                "draw_summary frames={} fill_fallbacks={}/{} text_fallbacks={}/{} stroke_fallbacks={}/{}",
+                frame,
+                fill_fallbacks,
+                fill_draws,
+                text_fallbacks,
+                text_draws,
+                stroke_fallbacks,
+                stroke_draws
+            ));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DrawStats {
+    pub mesh_tris: u32,
+    pub rect_fastpath: u32,
+    pub bounds_fallbacks: u32,
+}
+
+pub fn last_draw_stats() -> DrawStats {
+    DrawStats {
+        mesh_tris: LAST_MESH_TRIS.load(Ordering::Relaxed),
+        rect_fastpath: LAST_RECT_FASTPATH.load(Ordering::Relaxed),
+        bounds_fallbacks: LAST_BOUNDS_FALLBACKS.load(Ordering::Relaxed),
     }
 }
 
