@@ -16,11 +16,12 @@ pub struct BitmapSurface {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    pub is_opaque: bool,
 }
 
 impl BitmapSurface {
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Self {
-        Self { width, height, rgba }
+        Self { width, height, rgba, is_opaque: false }
     }
 
     pub fn is_valid(&self) -> bool {

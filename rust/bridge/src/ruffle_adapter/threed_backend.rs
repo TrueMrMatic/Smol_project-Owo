@@ -38,6 +38,8 @@ use super::tessellate;
 use crate::runlog;
 type ShapeKey = usize;
 
+const MAX_TRIS_PER_FRAME: u32 = 8000;
+
 fn bitmap_to_surface(bitmap: Bitmap) -> BitmapSurface {
     // Ruffle's Bitmap is expected to carry uncompressed RGBA8 pixels.
     // If the layout ever changes, we fall back to a visible magenta pattern.
@@ -60,7 +62,14 @@ fn bitmap_to_surface(bitmap: Bitmap) -> BitmapSurface {
             }
         }
     }
-    BitmapSurface { width, height, rgba }
+    let mut is_opaque = true;
+    for alpha in rgba.iter().skip(3).step_by(4) {
+        if *alpha != 255 {
+            is_opaque = false;
+            break;
+        }
+    }
+    BitmapSurface { width, height, rgba, is_opaque }
 }
 
 type BoxedFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
@@ -334,6 +343,8 @@ impl RenderBackend for ThreeDSBackend {
         let mut shapes: u32 = 0;
         let mut bitmaps: u32 = 0;
         let mut other: u32 = 0;
+        let mut tris_budget = MAX_TRIS_PER_FRAME;
+        let mut tri_cap_warned = false;
 
         if s.dump_next_frame {
             println!("[3DS] submit_frame: {} commands", commands.commands.len());
@@ -361,6 +372,18 @@ impl RenderBackend for ThreeDSBackend {
                                 }
 
                                 if shapes_cache.has_mesh(key) {
+                                    let shape_tris = shapes_cache.get_total_tri_count(key);
+                                    if shape_tris > tris_budget {
+                                        s.frame.cmds.push(RenderCmd::FillRect { rect: tr, color_key: key as u64, wireframe: wire_once });
+                                        if s.diagnostics.last_warning.is_none() {
+                                            s.diagnostics.last_warning = Some("tri_cap".to_string());
+                                        }
+                                        if !tri_cap_warned {
+                                            runlog::warn_line("tri_cap budget exceeded; falling back to bounds");
+                                            tri_cap_warned = true;
+                                        }
+                                        continue;
+                                    }
                                     let fill_count = shapes_cache.fill_count(key);
                                     // Emit one draw cmd per fill mesh.
                                     for fi in 0..fill_count {
@@ -377,6 +400,7 @@ impl RenderBackend for ThreeDSBackend {
                                     s.diagnostics.last_tris = s.diagnostics.last_tris.saturating_add(
                                         shapes_cache.get_total_tri_count(key),
                                     );
+                                    tris_budget = tris_budget.saturating_sub(shape_tris);
 
                                     if shapes_cache.is_tess_partial(key) && s.diagnostics.last_warning.is_none() {
                                         s.diagnostics.last_warning = Some("tri_part".to_string());
@@ -471,6 +495,7 @@ impl RenderBackend for ThreeDSBackend {
             width,
             height,
             rgba: vec![0u8; (width as usize) * (height as usize) * 4],
+            is_opaque: false,
         };
         self.caches.bitmaps.lock().unwrap().insert(key, surface);
 
