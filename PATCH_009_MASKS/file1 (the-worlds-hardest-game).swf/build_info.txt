@@ -1,0 +1,5 @@
+build_id=PATCH_009_MASKS
+base_id=PATCH_008_TEXT_VECTOR
+start_ms=1768502287300
+swf_path=sdmc:/flash/file1 (the-worlds-hardest-game).swf
+run_dir=sdmc:/flash/_runs/PATCH_009_MASKS/file1 (the-worlds-hardest-game).swf

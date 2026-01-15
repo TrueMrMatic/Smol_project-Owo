@@ -1,0 +1,213 @@
+[000001] INFO RunLog init ok run_dir=sdmc:/flash/_runs/PATCH_009_MASKS/file1 (the-worlds-hardest-game).swf
+[000002] INFO Engine::new begin root_path=sdmc:/flash/file1 (the-worlds-hardest-game).swf
+[000003] INFO Engine::new read_file ok
+[000004] INFO Engine::new SwfMovie ok version=8
+[000005] INFO tick heartbeat frames=60 stage=submit_frame
+[000006] INFO tick heartbeat frames=120 stage=submit_frame
+[000007] INFO tick heartbeat frames=180 stage=submit_frame
+[000008] INFO tick heartbeat frames=240 stage=submit_frame
+[000009] INFO tick heartbeat frames=300 stage=submit_frame
+[000010] INFO tick heartbeat frames=360 stage=submit_frame
+[000011] INFO tick heartbeat frames=420 stage=submit_frame
+[000012] INFO tick heartbeat frames=480 stage=submit_frame
+[000013] INFO tick heartbeat frames=540 stage=submit_frame
+[000014] INFO tick heartbeat frames=600 stage=submit_frame
+[000015] INFO tick heartbeat frames=660 stage=submit_frame
+[000016] INFO tick heartbeat frames=720 stage=submit_frame
+[000017] INFO tick heartbeat frames=780 stage=submit_frame
+[000018] INFO tick heartbeat frames=840 stage=submit_frame
+[000019] INFO tick heartbeat frames=900 stage=submit_frame
+[000020] INFO tick heartbeat frames=960 stage=submit_frame
+[000021] INFO tick heartbeat frames=1020 stage=submit_frame
+[000022] INFO tick heartbeat frames=1080 stage=submit_frame
+[000023] INFO tick heartbeat frames=1140 stage=submit_frame
+[000024] INFO tick heartbeat frames=1200 stage=submit_frame
+[000025] INFO tick heartbeat frames=1260 stage=submit_frame
+[000026] INFO tick heartbeat frames=1320 stage=submit_frame
+[000027] INFO tick heartbeat frames=1380 stage=submit_frame
+[000028] INFO tick heartbeat frames=1440 stage=submit_frame
+[000029] INFO tick heartbeat frames=1500 stage=submit_frame
+[000030] INFO tick heartbeat frames=1560 stage=submit_frame
+[000031] INFO tick heartbeat frames=1620 stage=submit_frame
+[000032] INFO tick heartbeat frames=1680 stage=submit_frame
+[000033] INFO tick heartbeat frames=1740 stage=submit_frame
+[000034] INFO tick heartbeat frames=1800 stage=submit_frame
+[000035] INFO tick heartbeat frames=1860 stage=submit_frame
+[000036] INFO tick heartbeat frames=1920 stage=submit_frame
+[000037] INFO tick heartbeat frames=1980 stage=submit_frame
+[000038] INFO register_shape begin id=1 b=-60 -37 110 49
+[000039] INFO tessellate_fills ok id=1 any_failed=false
+[000040] INFO register_shape begin id=2 b=6710886 6710886 0 0
+[000041] INFO tessellate_fills ok id=2 any_failed=false
+[000042] INFO register_shape begin id=3 b=0 -682 113 227
+[000043] INFO tessellate_fills ok id=3 any_failed=false
+[000044] INFO register_shape begin id=4 b=113 0 114 227
+[000045] INFO tessellate_fills ok id=4 any_failed=false
+[000046] INFO register_shape begin id=5 b=113 0 114 113
+[000047] INFO tessellate_fills ok id=5 any_failed=false
+[000048] INFO register_shape begin id=6 b=113 -682 569 795
+[000049] INFO tessellate_fills ok id=6 any_failed=false
+[000050] INFO register_shape begin id=7 b=113 -682 569 795
+[000051] INFO tessellate_fills ok id=7 any_failed=false
+[000052] INFO register_shape begin id=8 b=113 -682 114 795
+[000053] INFO tessellate_fills ok id=8 any_failed=false
+[000054] INFO register_shape begin id=9 b=0 -682 568 795
+[000055] INFO tessellate_fills ok id=9 any_failed=false
+[000056] INFO register_shape begin id=10 b=0 -682 1024 795
+[000057] INFO tessellate_fills ok id=10 any_failed=false
+[000058] INFO register_shape begin id=11 b=0 -455 455 568
+[000059] INFO tessellate_fills ok id=11 any_failed=false
+[000060] INFO register_shape begin id=12 b=0 -682 455 795
+[000061] INFO tessellate_fills ok id=12 any_failed=false
+[000062] INFO register_shape begin id=13 b=0 -455 455 568
+[000063] INFO tessellate_fills ok id=13 any_failed=false
+[000064] INFO register_shape begin id=14 b=0 -455 455 796
+[000065] INFO tessellate_fills ok id=14 any_failed=false
+[000066] INFO register_shape begin id=15 b=0 -682 455 795
+[000067] INFO tessellate_fills ok id=15 any_failed=false
+[000068] INFO register_shape begin id=16 b=0 -682 113 795
+[000069] INFO tessellate_fills ok id=16 any_failed=false
+[000070] INFO register_shape begin id=17 b=0 -682 113 795
+[000071] INFO tessellate_fills ok id=17 any_failed=false
+[000072] INFO register_shape begin id=18 b=0 -455 796 568
+[000073] INFO tessellate_fills ok id=18 any_failed=false
+[000074] INFO register_shape begin id=19 b=0 -455 455 568
+[000075] INFO tessellate_fills ok id=19 any_failed=false
+[000076] INFO register_shape begin id=20 b=0 -455 455 568
+[000077] INFO tessellate_fills ok id=20 any_failed=false
+[000078] INFO register_shape begin id=21 b=0 -455 455 796
+[000079] INFO tessellate_fills ok id=21 any_failed=false
+[000080] INFO register_shape begin id=22 b=0 -455 341 568
+[000081] INFO tessellate_fills ok id=22 any_failed=false
+[000082] INFO register_shape begin id=23 b=0 -455 455 568
+[000083] INFO tessellate_fills ok id=23 any_failed=false
+[000084] INFO register_shape begin id=24 b=0 -568 227 681
+[000085] INFO tessellate_fills ok id=24 any_failed=false
+[000086] INFO register_shape begin id=25 b=0 -455 455 568
+[000087] INFO tessellate_fills ok id=25 any_failed=false
+[000088] INFO register_shape begin id=26 b=0 -455 568 568
+[000089] INFO tessellate_fills ok id=26 any_failed=false
+[000090] INFO register_shape begin id=27 b=0 -455 568 568
+[000091] INFO tessellate_fills ok id=27 any_failed=false
+[000092] INFO register_shape begin id=28 b=0 -455 568 796
+[000093] INFO tessellate_fills ok id=28 any_failed=false
+[000094] INFO register_shape begin id=29 b=0 0 212 212
+[000095] INFO tessellate_fills ok id=29 any_failed=false
+[000096] INFO register_shape begin id=30 b=-113 -13 226 26
+[000097] INFO tessellate_fills ok id=30 any_failed=false
+[000098] INFO register_shape begin id=31 b=-113 -25 52 10
+[000099] INFO tessellate_fills ok id=31 any_failed=false
+[000100] INFO register_shape begin id=32 b=-276 -64 552 124
+[000101] INFO tessellate_fills ok id=32 any_failed=false
+[000102] INFO register_shape begin id=33 b=-27 -6 53 13
+[000103] INFO tessellate_fills ok id=33 any_failed=false
+[000104] INFO register_shape begin id=34 b=-113 -25 51 10
+[000105] INFO tessellate_fills ok id=34 any_failed=false
+[000106] INFO register_shape begin id=35 b=-147 -95 294 190
+[000107] INFO tessellate_fills ok id=35 any_failed=false
+[000108] INFO register_shape begin id=36 b=-47 37 71 4
+[000109] INFO tessellate_fills ok id=36 any_failed=false
+[000110] INFO register_shape begin id=37 b=-53 28 83 21
+[000111] INFO tessellate_fills ok id=37 any_failed=false
+[000112] INFO register_shape begin id=38 b=-54 21 84 28
+[000113] INFO tessellate_fills ok id=38 any_failed=false
+[000114] INFO register_shape begin id=39 b=-54 20 84 29
+[000115] INFO tessellate_fills ok id=39 any_failed=false
+[000116] INFO register_shape begin id=40 b=-54 31 84 18
+[000117] INFO tessellate_fills ok id=40 any_failed=false
+[000118] INFO register_shape begin id=41 b=-58 32 90 37
+[000119] INFO tessellate_fills ok id=41 any_failed=false
+[000120] INFO register_shape begin id=42 b=-58 32 90 63
+[000121] INFO tessellate_fills ok id=42 any_failed=false
+[000122] INFO register_shape begin id=43 b=-58 32 90 66
+[000123] INFO tessellate_fills ok id=43 any_failed=false
+[000124] INFO register_shape begin id=44 b=-58 32 90 67
+[000125] INFO tessellate_fills ok id=44 any_failed=false
+[000126] INFO tick heartbeat frames=2040 stage=submit_frame
+[000127] INFO tick heartbeat frames=2100 stage=submit_frame
+[000128] INFO tick heartbeat frames=2160 stage=submit_frame
+[000130] INFO tick heartbeat frames=2220 stage=submit_frame
+[000131] INFO Engine shutdown
+[000132] INFO Engine::new begin root_path=sdmc:/flash/file4 (boxhead2play).swf
+[000133] INFO Engine::new read_file ok
+[000134] INFO Engine::new SwfMovie ok version=8
+[000135] INFO tick heartbeat frames=60 stage=submit_frame
+[000136] INFO tick heartbeat frames=120 stage=submit_frame
+[000137] INFO tick heartbeat frames=180 stage=submit_frame
+[000138] INFO tick heartbeat frames=240 stage=submit_frame
+[000139] INFO tick heartbeat frames=300 stage=submit_frame
+[000140] INFO tick heartbeat frames=360 stage=submit_frame
+[000141] INFO tick heartbeat frames=420 stage=submit_frame
+[000142] INFO tick heartbeat frames=480 stage=submit_frame
+[000143] INFO tick heartbeat frames=540 stage=submit_frame
+[000144] INFO tick heartbeat frames=600 stage=submit_frame
+[000145] INFO tick heartbeat frames=660 stage=submit_frame
+[000146] INFO tick heartbeat frames=720 stage=submit_frame
+[000147] INFO tick heartbeat frames=780 stage=submit_frame
+[000148] INFO tick heartbeat frames=840 stage=submit_frame
+[000149] INFO tick heartbeat frames=900 stage=submit_frame
+[000150] INFO tick heartbeat frames=960 stage=submit_frame
+[000151] INFO tick heartbeat frames=1020 stage=submit_frame
+[000152] INFO tick heartbeat frames=1080 stage=submit_frame
+[000153] INFO tick heartbeat frames=1140 stage=submit_frame
+[000154] INFO tick heartbeat frames=1200 stage=submit_frame
+[000155] INFO register_shape begin id=1 b=0 0 640 480
+[000156] INFO tessellate_fills ok id=1 any_failed=false
+[000157] INFO register_shape begin id=2 b=6710886 6710886 0 0
+[000158] INFO tessellate_fills ok id=2 any_failed=false
+[000159] INFO register_shape begin id=3 b=2 -742 600 742
+[000160] INFO tessellate_fills ok id=3 any_failed=false
+[000161] INFO register_shape begin id=4 b=75 -732 437 732
+[000162] INFO tessellate_fills ok id=4 any_failed=false
+[000163] INFO register_shape begin id=5 b=75 -732 520 732
+[000164] INFO tessellate_fills ok id=5 any_failed=false
+[000165] INFO register_shape begin id=6 b=92 -732 100 732
+[000166] INFO tessellate_fills ok id=6 any_failed=false
+[000167] INFO register_shape begin id=7 b=75 -732 431 732
+[000168] INFO tessellate_fills ok id=7 any_failed=false
+[000169] INFO register_shape begin id=8 b=80 -740 516 740
+[000170] INFO tessellate_fills ok id=8 any_failed=false
+[000171] INFO register_shape begin id=9 b=9 -732 576 732
+[000172] INFO tessellate_fills ok id=9 any_failed=false
+[000173] INFO register_shape begin id=10 b=6 -732 589 742
+[000174] INFO tessellate_fills ok id=10 any_failed=false
+[000175] INFO register_shape begin id=11 b=6 -732 860 742
+[000176] INFO tessellate_fills ok id=11 any_failed=false
+[000177] INFO register_shape begin id=12 b=0 0 639 480
+[000178] INFO tessellate_fills ok id=12 any_failed=false
+[000179] INFO register_shape begin id=13 b=214 372 211 63
+[000180] INFO tessellate_fills ok id=13 any_failed=false
+[000181] INFO tick heartbeat frames=1260 stage=submit_frame
+[000182] INFO tick heartbeat frames=1320 stage=submit_frame
+[000183] INFO tick heartbeat frames=1380 stage=submit_frame
+[000184] INFO tick heartbeat frames=1440 stage=submit_frame
+[000185] INFO tick heartbeat frames=1500 stage=submit_frame
+[000186] INFO tick heartbeat frames=1560 stage=submit_frame
+[000187] INFO tick heartbeat frames=1620 stage=submit_frame
+[000188] INFO tick heartbeat frames=1680 stage=submit_frame
+[000189] INFO tick heartbeat frames=1740 stage=submit_frame
+[000190] INFO tick heartbeat frames=1800 stage=submit_frame
+[000191] INFO tick heartbeat frames=1860 stage=submit_frame
+[000192] INFO tick heartbeat frames=1920 stage=submit_frame
+[000193] INFO tick heartbeat frames=1980 stage=submit_frame
+[000194] INFO tick heartbeat frames=2040 stage=submit_frame
+[000195] INFO tick heartbeat frames=2100 stage=submit_frame
+[000196] INFO tick heartbeat frames=2160 stage=submit_frame
+[000197] INFO tick heartbeat frames=2220 stage=submit_frame
+[000198] INFO tick heartbeat frames=2280 stage=submit_frame
+[000199] INFO tick heartbeat frames=2340 stage=submit_frame
+[000200] INFO tick heartbeat frames=2400 stage=submit_frame
+[000201] INFO register_shape begin id=14 b=0 0 400 169
+[000202] INFO tessellate_fills ok id=14 any_failed=false
+[000203] INFO register_shape begin id=15 b=-31 -14 68 23
+[000204] INFO tessellate_fills ok id=15 any_failed=false
+[000205] INFO register_shape begin id=16 b=-31 -14 68 25
+[000206] INFO tessellate_fills ok id=16 any_failed=true
+[000207] INFO register_shape begin id=17 b=-31 -14 68 23
+[000208] INFO tessellate_fills ok id=17 any_failed=false
+[000209] INFO register_shape begin id=18 b=-55 225 112 32
+[000210] INFO tessellate_fills ok id=18 any_failed=false
+[000211] INFO register_shape begin id=19 b=-320 191 641 98
+[000212] INFO tessellate_fills ok id=19 any_failed=false
+[000213] INFO register_shape begin id=20 b=-320 192 640 96
+[000214] INFO tessellate_fills ok id=20 any_failed=false
