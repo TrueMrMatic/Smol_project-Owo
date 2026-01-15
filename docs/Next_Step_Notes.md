@@ -1,11 +1,11 @@
-# Next Step Notes — for the next patch after PATCH_001_PROTOCOL_INIT_v2
+# Next Step Notes — for the next patch after PATCH_002_UI_SNAPSHOT_SAFETY
 
-You are continuing from PATCH_001_PROTOCOL_INIT_v2 on top of BASELINE_000_BEFORE_BUG.
+You are continuing from PATCH_002_UI_SNAPSHOT_SAFETY on top of PATCH_001_PROTOCOL_INIT_v2.
 
 ## Current state
-- Baseline renderer loads redkanga.swf without the freeze introduced in later snapshots.
 - Run logging + SD run bundles are in place with low overhead.
-- Bottom-screen log window exists; verbosity can be cycled with SELECT.
+- Bottom screen shows controls, a fixed log window, a notice line, and HUD status.
+- Snapshot hotkey (Y) is rate-limited and avoids command dumps to reduce crash risk.
 
 ## Inputs you will receive
 - A run bundle zip from the user (copied from SD) containing boottrace/last_stage/warnings/status snapshots.
@@ -13,21 +13,21 @@ You are continuing from PATCH_001_PROTOCOL_INIT_v2 on top of BASELINE_000_BEFORE
 - Possibly a SWF that fails.
 
 ## Next theme (ONLY ONE)
-Implement **Solid triangle fills for shapes** (Step 2A), but do it safely:
-- Start with non-AA solid fills only.
-- Keep fallback to bounds when tessellation fails.
-- Add caps + logging around heavy steps (only at verbosity 2).
+Validate snapshot stability + collect run bundles from real hardware:
+- Confirm Y no longer crashes and run bundles are written reliably.
+- Verify the new bottom-screen UI remains stable across SWF loads.
+- Capture a run bundle for at least one heavy SWF.
 
 ## Acceptance criteria
-- The user can load at least one complex SWF (including redkanga) without new freezes.
-- Loading screen FPS must remain close to baseline (do not add per-frame filesystem writes).
-- New fill rendering produces visible filled shapes (even if imperfect) and does not regress existing strokes/bounds rendering.
+- Y snapshot never crashes and always creates a `status_snapshot` entry.
+- The bottom-screen UI stays readable without scrolling/flicker during playback.
+- A run bundle from hardware is available for analysis.
 
 ## Implementation checklist
-- Add a single module for fill tessellation output and triangle submission (avoid scattering logic).
-- Add stage markers for heavy steps using runlog::stage().
-- Keep UI log volume low by default.
+- Confirm UI lines are stable and no long prints cause scroll.
+- Ensure snapshot cooldown feedback is visible.
+- Make sure run bundle paths still match `SD_Run_Artifacts.md`.
 
 ## Out of scope
-- Do NOT refactor caches and renderer pipeline in the same patch.
-- Do NOT add bitmap rendering or sprite masks yet.
+- Do NOT add new rendering features in the same patch.
+- Do NOT change runlog formats unless necessary.
