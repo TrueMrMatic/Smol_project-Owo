@@ -19,11 +19,6 @@ pub extern "C" fn bridge_runlog_drain(out: *mut c_char, out_len: u32) -> u32 {
     n as u32
 }
 
-#[no_mangle]
-pub extern "C" fn bridge_runlog_cycle_verbosity() {
-    runlog::cycle_verbosity();
-}
-
 
 /// Opaque handle passed to C.
 ///

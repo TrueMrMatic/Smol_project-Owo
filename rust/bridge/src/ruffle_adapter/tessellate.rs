@@ -6,9 +6,10 @@
 //! - Output types must be renderer-owned: `Vec<Vertex2>` + `Vec<u16>`.
 //! - No per-frame allocations: tessellation runs at **register_shape** time.
 
-use crate::render::cache::shapes::{FillMesh, Vertex2};
+use crate::render::cache::shapes::{FillMesh, StrokeMesh, Vertex2};
 use crate::runlog;
 use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath, FillRule};
+use swf::{FillStyle, LineJoinStyle};
 
 // We use earcut for robust polygon-with-holes triangulation.
 // This runs at registration time, so the CPU cost is acceptable.
@@ -22,6 +23,7 @@ pub enum TessError {
 }
 
 const MAX_POINTS_PER_FILL: usize = 4096;
+const MAX_POINTS_PER_STROKE: usize = 4096;
 const MAX_VERTS_PER_MESH: usize = u16::MAX as usize;
 
 /// Output of shape tessellation.
@@ -31,6 +33,12 @@ const MAX_VERTS_PER_MESH: usize = u16::MAX as usize;
 pub struct TessOutput {
     pub fills: Vec<FillMesh>,
     /// True if at least one fill failed to tessellate.
+    pub any_failed: bool,
+}
+
+#[derive(Debug)]
+pub struct StrokeOutput {
+    pub strokes: Vec<StrokeMesh>,
     pub any_failed: bool,
 }
 
@@ -80,7 +88,8 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
         }
 
         // 3) Triangulate each outer-with-holes group using earcut and merge into this fill mesh.
-        for group in groups {
+        for mut group in groups {
+            orient_group_winding(&mut group);
             let base = out_verts.len();
             if base >= MAX_VERTS_PER_MESH {
                 return Err(TessError::TooManyVerts);
@@ -126,6 +135,70 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>) -> Result<TessOutput, TessEr
     Ok(TessOutput { fills, any_failed })
 }
 
+pub fn tessellate_strokes(shape: &DistilledShape<'_>) -> Result<StrokeOutput, TessError> {
+    let mut strokes: Vec<StrokeMesh> = Vec::new();
+    let mut any_failed = false;
+    let tol_px = tessellation_tolerance_px(shape);
+
+    for path in &shape.paths {
+        let (style, is_closed, commands) = match path {
+            DrawPath::Stroke { style, is_closed, commands } => (style, *is_closed, commands),
+            _ => continue,
+        };
+
+        let FillStyle::Color(color) = style.fill_style() else {
+            any_failed = true;
+            runlog::warn_line("stroke_tess: non-color stroke fill unsupported");
+            continue;
+        };
+
+        let width_px = style.width().to_pixels() as f32;
+        if width_px <= 0.0 {
+            continue;
+        }
+        let half_w = (width_px * 0.5).max(0.5);
+        let miter_limit = match style.join_style() {
+            LineJoinStyle::Miter(limit) => f32::from(limit).max(1.0),
+            _ => 4.0,
+        };
+
+        let mut polylines = flatten_commands_to_polylines(commands.iter(), tol_px, is_closed);
+        for line in polylines.iter_mut() {
+            simplify_polyline(line);
+        }
+        polylines.retain(|line| line.len() >= 2);
+
+        let total_points: usize = polylines.iter().map(|c| c.len()).sum();
+        if total_points > MAX_POINTS_PER_STROKE {
+            any_failed = true;
+            runlog::warn_line(&format!("tessellate_strokes cap_points total={}", total_points));
+            continue;
+        }
+
+        for line in polylines {
+            match build_stroke_mesh(&line, half_w, miter_limit, is_closed) {
+                Some(mesh) => {
+                    strokes.push(StrokeMesh {
+                        verts: mesh.verts,
+                        indices: mesh.indices,
+                        r: color.r,
+                        g: color.g,
+                        b: color.b,
+                    });
+                }
+                None => {
+                    any_failed = true;
+                }
+            }
+        }
+    }
+
+    if strokes.is_empty() {
+        return Err(TessError::NoContours);
+    }
+    Ok(StrokeOutput { strokes, any_failed })
+}
+
 fn tessellation_tolerance_px(shape: &DistilledShape<'_>) -> f32 {
     let bounds = shape.shape_bounds;
     let w = (bounds.x_max - bounds.x_min).to_pixels().abs() as f32;
@@ -138,6 +211,71 @@ fn tessellation_tolerance_px(shape: &DistilledShape<'_>) -> f32 {
 // -----------------
 // Path flattening
 // -----------------
+
+/// Flatten one DrawPath into one or more open polylines.
+fn flatten_commands_to_polylines<'a, I>(cmds: I, tol_px: f32, close: bool) -> Vec<Vec<(f32, f32)>>
+where
+    I: IntoIterator<Item = &'a DrawCommand>,
+{
+    let mut lines: Vec<Vec<(f32, f32)>> = Vec::new();
+    let mut cur: Vec<(f32, f32)> = Vec::new();
+    let mut pen: Option<(f32, f32)> = None;
+    let mut start: Option<(f32, f32)> = None;
+
+    let mut finalize = |cur: &mut Vec<(f32, f32)>, start: &mut Option<(f32, f32)>| {
+        if cur.len() >= 2 {
+            if close {
+                if let Some(s) = *start {
+                    let last = cur[cur.len() - 1];
+                    if (last.0 - s.0).abs() > 0.01 || (last.1 - s.1).abs() > 0.01 {
+                        cur.push(s);
+                    }
+                }
+            }
+            lines.push(std::mem::take(cur));
+        } else {
+            cur.clear();
+        }
+        *start = None;
+    };
+
+    for cmd in cmds.into_iter() {
+        match cmd {
+            DrawCommand::MoveTo(p) => {
+                finalize(&mut cur, &mut start);
+                let pt = (p.x.to_pixels() as f32, p.y.to_pixels() as f32);
+                cur.push(pt);
+                pen = Some(pt);
+                start = Some(pt);
+            }
+            DrawCommand::LineTo(p) => {
+                let pt = (p.x.to_pixels() as f32, p.y.to_pixels() as f32);
+                cur.push(pt);
+                pen = Some(pt);
+            }
+            DrawCommand::QuadraticCurveTo { control, anchor } => {
+                if let Some(p0) = pen {
+                    let p1 = (control.x.to_pixels() as f32, control.y.to_pixels() as f32);
+                    let p2 = (anchor.x.to_pixels() as f32, anchor.y.to_pixels() as f32);
+                    flatten_quad(p0, p1, p2, tol_px, 0, &mut cur);
+                    pen = Some(p2);
+                }
+            }
+            DrawCommand::CubicCurveTo { control_a, control_b, anchor } => {
+                if let Some(p0) = pen {
+                    let p1 = (control_a.x.to_pixels() as f32, control_a.y.to_pixels() as f32);
+                    let p2 = (control_b.x.to_pixels() as f32, control_b.y.to_pixels() as f32);
+                    let p3 = (anchor.x.to_pixels() as f32, anchor.y.to_pixels() as f32);
+                    flatten_cubic(p0, p1, p2, p3, tol_px, 0, &mut cur);
+                    pen = Some(p3);
+                }
+            }
+        }
+    }
+
+    finalize(&mut cur, &mut start);
+    lines
+}
 
 /// Flatten one DrawPath into one or more closed contours.
 ///
@@ -335,6 +473,105 @@ fn simplify_ring(ring: &mut Vec<(f32, f32)>) {
     *ring = out;
 }
 
+fn simplify_polyline(line: &mut Vec<(f32, f32)>) {
+    if line.len() < 2 {
+        return;
+    }
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(line.len());
+    for &p in line.iter() {
+        if out.last().copied().map(|q| (p.0 - q.0).abs() < 0.05 && (p.1 - q.1).abs() < 0.05).unwrap_or(false) {
+            continue;
+        }
+        out.push(p);
+    }
+    if out.len() >= 2 {
+        *line = out;
+    }
+}
+
+fn build_stroke_mesh(points: &[(f32, f32)], half_w: f32, miter_limit: f32, closed: bool) -> Option<FillMesh> {
+    if points.len() < 2 {
+        return None;
+    }
+    let mut pts = points.to_vec();
+    if closed && approx_eq(pts[0], pts[pts.len() - 1]) {
+        pts.pop();
+    }
+    if pts.len() < 2 {
+        return None;
+    }
+    if pts.len() * 2 > MAX_VERTS_PER_MESH {
+        return None;
+    }
+
+    let count = pts.len();
+    let seg_count = if closed { count } else { count - 1 };
+    let mut normals: Vec<(f32, f32)> = Vec::with_capacity(seg_count);
+    for i in 0..seg_count {
+        let p0 = pts[i];
+        let p1 = pts[(i + 1) % count];
+        let dx = p1.0 - p0.0;
+        let dy = p1.1 - p0.1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 0.0001 {
+            normals.push((0.0, 0.0));
+            continue;
+        }
+        let nx = -dy / len;
+        let ny = dx / len;
+        normals.push((nx, ny));
+    }
+
+    let mut verts: Vec<Vertex2> = Vec::with_capacity(count * 2);
+    for i in 0..count {
+        let p = pts[i];
+        let (n_prev, n_next) = if closed {
+            let prev = normals[(i + count - 1) % count];
+            let next = normals[i % count];
+            (prev, next)
+        } else if i == 0 {
+            (normals[0], normals[0])
+        } else if i == count - 1 {
+            (normals[count - 2], normals[count - 2])
+        } else {
+            (normals[i - 1], normals[i])
+        };
+        let miter = normalize_vec((n_prev.0 + n_next.0, n_prev.1 + n_next.1));
+        let denom = (miter.0 * n_prev.0 + miter.1 * n_prev.1).abs().max(0.0001);
+        let mut miter_len = half_w / denom;
+        if miter_len > miter_limit * half_w {
+            miter_len = half_w;
+        }
+        let offset = (miter.0 * miter_len, miter.1 * miter_len);
+        let left = (p.0 + offset.0, p.1 + offset.1);
+        let right = (p.0 - offset.0, p.1 - offset.1);
+        verts.push(Vertex2 { x: left.0.round() as i32, y: left.1.round() as i32 });
+        verts.push(Vertex2 { x: right.0.round() as i32, y: right.1.round() as i32 });
+    }
+
+    let mut indices: Vec<u16> = Vec::new();
+    let segs = if closed { count } else { count - 1 };
+    for i in 0..segs {
+        let next = (i + 1) % count;
+        let i0 = (2 * i) as u16;
+        let i1 = (2 * i + 1) as u16;
+        let i2 = (2 * next) as u16;
+        let i3 = (2 * next + 1) as u16;
+        indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+    }
+
+    Some(FillMesh { verts, indices })
+}
+
+fn normalize_vec(v: (f32, f32)) -> (f32, f32) {
+    let len = (v.0 * v.0 + v.1 * v.1).sqrt();
+    if len <= 0.0001 {
+        (0.0, 0.0)
+    } else {
+        (v.0 / len, v.1 / len)
+    }
+}
+
 /// Pick a point that is (very likely) just inside the contour.
 fn sample_point_inside_contour(contour: &[(f32, f32)]) -> (f32, f32) {
     // Find a non-degenerate edge.
@@ -493,6 +730,20 @@ fn group_contours_more_correct(contours: &[Vec<(f32, f32)>], rule: FillRule) -> 
     }
 
     groups
+}
+
+fn orient_group_winding(group: &mut ContourGroup) {
+    let outer_ccw = polygon_area_signed(&group.outer) > 0.0;
+    if !outer_ccw {
+        group.outer.reverse();
+    }
+    let desired_hole_ccw = !outer_ccw;
+    for hole in &mut group.holes {
+        let hole_ccw = polygon_area_signed(hole) > 0.0;
+        if hole_ccw != desired_hole_ccw {
+            hole.reverse();
+        }
+    }
 }
 
 #[inline(always)]
