@@ -19,7 +19,6 @@ u32   bridge_runlog_drain(char* out, u32 out_len);
 void  bridge_runlog_cycle_verbosity(void);
 void   bridge_print_status(void* ctx);
 void   bridge_request_command_dump_ctx(void* ctx);
-void   bridge_toggle_shape_mode_ctx(void* ctx);
 void   bridge_toggle_wireframe_once_ctx(void* ctx);
 void   bridge_set_wireframe_hold_ctx(void* ctx, int enabled);
 uint32_t bridge_renderer_ready_ctx(void* ctx);
@@ -39,25 +38,79 @@ static void clear_top_black_double(void) {
     }
 }
 
-static void print_help(const char* swf_path) {
+// ---- Bottom-screen UI layout ----
+#define UI_ROW_TITLE 1
+#define UI_ROW_SWF 2
+#define UI_ROW_SEPARATOR 3
+#define UI_ROW_CONTROLS 4
+#define UI_ROW_LOG_LABEL 9
+#define UI_ROW_LOG_START 10
+#define UI_LOG_LINES 16
+#define UI_ROW_NOTICE 26
+#define UI_ROW_WARN 27
+#define UI_ROW_HUD 28
+
+static const char* path_basename(const char* path) {
+    const char* last = path;
+    for (const char* p = path; *p; ++p) {
+        if (*p == '/' || *p == '\\') {
+            last = p + 1;
+        }
+    }
+    return last;
+}
+
+static void ui_clear_log_window(void);
+
+static void ui_draw_static(const char* swf_path) {
     consoleClear();
-    printf("Selected: %s\n", swf_path);
-    printf("Render: REAL CommandList (bootstrap).\n");
-    printf("HUD: bottom line updates every frame.\n");
-    printf("\nControls (player):\n");
-    printf("  X: toggle shape mode (mR rectangles / mT triangles)\n");
-    printf("  L (hold): show triangle edges (wireframe overlay)\n");
-    printf("  Y: dump CommandList + status (after first commands)\n");
-    printf("  B: back to file selector\n");
-    printf("  START: exit app\n");
+    const char* base = path_basename(swf_path);
+    printf("\x1b[%d;0HRuffle3DS Player", UI_ROW_TITLE);
+    printf("\x1b[%d;0HSWF: %-36.36s", UI_ROW_SWF, base);
+    printf("\x1b[%d;0H========================================", UI_ROW_SEPARATOR);
+    printf("\x1b[%d;0HControls:", UI_ROW_CONTROLS);
+    printf("\x1b[%d;0H  L: wireframe (hold)", UI_ROW_CONTROLS + 1);
+    printf("\x1b[%d;0H  Y: write snapshot", UI_ROW_CONTROLS + 2);
+    printf("\x1b[%d;0H  SELECT: verbosity  B: back", UI_ROW_CONTROLS + 3);
+    printf("\x1b[%d;0H  START: exit app", UI_ROW_CONTROLS + 4);
+    printf("\x1b[%d;0HLogs:", UI_ROW_LOG_LABEL);
+    ui_clear_log_window();
 }
 
 // ---- Boottrace console window (bottom screen) ----
-#define LOG_WINDOW_LINES 24
+#define LOG_WINDOW_LINES UI_LOG_LINES
 static char g_log_lines[LOG_WINDOW_LINES][41];
 static int  g_log_count = 0;
 static int  g_log_start = 0;
 static int  g_log_dirty = 1;
+static char g_notice[41] = {0};
+static u32 g_notice_ttl = 0;
+static u64 g_last_snapshot_ms = 0;
+
+static void ui_clear_log_window(void) {
+    for (int i = 0; i < LOG_WINDOW_LINES; i++) {
+        int row = UI_ROW_LOG_START + i;
+        printf("\x1b[%d;0H%-40s", row, "");
+    }
+}
+
+static void ui_reset_log_state(void) {
+    g_log_count = 0;
+    g_log_start = 0;
+    g_log_dirty = 1;
+    g_notice[0] = 0;
+    g_notice_ttl = 0;
+    g_last_snapshot_ms = 0;
+    ui_clear_log_window();
+}
+
+static void ui_set_notice(const char* msg, u32 ttl_frames) {
+    if (!msg) return;
+    strncpy(g_notice, msg, 40);
+    g_notice[40] = 0;
+    g_notice_ttl = ttl_frames;
+    printf("\x1b[%d;0H%-40s", UI_ROW_NOTICE, g_notice);
+}
 
 static void log_push_line(const char* s) {
     if (!s || !s[0]) return;
@@ -105,9 +158,9 @@ static void log_drain_from_rust(void) {
 static void log_redraw_window(void) {
     if (!g_log_dirty) return;
     g_log_dirty = 0;
-    // Draw log window in rows 2..(2+LOG_WINDOW_LINES-1)
+    // Draw log window in rows UI_ROW_LOG_START..(UI_ROW_LOG_START+LOG_WINDOW_LINES-1)
     for (int i = 0; i < LOG_WINDOW_LINES; i++) {
-        int row = 2 + i;
+        int row = UI_ROW_LOG_START + i;
         char* line = (char*)"";
         if (i < g_log_count) {
             int idx = (g_log_start + i) % LOG_WINDOW_LINES;
@@ -184,8 +237,14 @@ static void hud_draw(void* ctx) {
 
     // Print at fixed rows to avoid scrolling/flicker.
     // Bottom console is 40x30 chars; row index is 1-based.
-    printf("\x1b[28;0H%-40s", warn[0] ? warn : "");
-    printf("\x1b[29;0H%-40s", line);
+    if (g_notice_ttl > 0) {
+        g_notice_ttl--;
+        printf("\x1b[%d;0H%-40s", UI_ROW_NOTICE, g_notice);
+    } else {
+        printf("\x1b[%d;0H%-40s", UI_ROW_NOTICE, "");
+    }
+    printf("\x1b[%d;0H%-40s", UI_ROW_WARN, warn[0] ? warn : "");
+    printf("\x1b[%d;0H%-40s", UI_ROW_HUD, line);
 }
 
 int main(int argc, char* argv[]) {
@@ -221,7 +280,8 @@ int main(int argc, char* argv[]) {
 
         void* ctx = bridge_player_create_with_url(swf_path);
 
-        print_help(swf_path);
+        ui_reset_log_state();
+        ui_draw_static(swf_path);
 
         // Playback loop
         while (aptMainLoop()) {
@@ -245,22 +305,17 @@ int main(int argc, char* argv[]) {
                 bridge_runlog_cycle_verbosity();
             }
 
-            if (down & KEY_X) {
-                // Toggle shape mode: rectangle bounds vs triangle mesh mode.
-                bridge_toggle_shape_mode_ctx(ctx);
-            }
-
             // Hold L to show triangle edges continuously.
             bridge_set_wireframe_hold_ctx(ctx, (held & KEY_L) ? 1 : 0);
             if (down & KEY_Y) {
-                // Always write an SD snapshot so we can debug freezes later.
-                bridge_write_status_snapshot_ctx(ctx);
-                if (bridge_renderer_ready_ctx(ctx)) {
-                    bridge_request_command_dump_ctx(ctx);
-                    bridge_print_status(ctx);
+                // Write an SD snapshot so we can debug freezes later.
+                u64 now_ms = osGetTime();
+                if (now_ms - g_last_snapshot_ms >= 500) {
+                    g_last_snapshot_ms = now_ms;
+                    bridge_write_status_snapshot_ctx(ctx);
+                    ui_set_notice("snapshot saved", 60);
                 } else {
-                    // Not ready yet; you'll see the live status on the HUD line.
-                    printf("\n(not ready yet)\n");
+                    ui_set_notice("snapshot cooldown", 30);
                 }
             }
 
