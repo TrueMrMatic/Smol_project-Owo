@@ -13,7 +13,7 @@ static TEXTURE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static STROKE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static TEXT_MESH_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static MASK_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
-static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
+static FRAME_COUNTER: AtomicU32 = AtomicU32::new(0);
 static FILL_DRAW_COUNT: AtomicU32 = AtomicU32::new(0);
 static FILL_FALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
 static TEXT_DRAW_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -23,7 +23,7 @@ static STROKE_FALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_MESH_TRIS: AtomicU32 = AtomicU32::new(0);
 static LAST_RECT_FASTPATH: AtomicU32 = AtomicU32::new(0);
 static LAST_BOUNDS_FALLBACKS: AtomicU32 = AtomicU32::new(0);
-const DRAW_SUMMARY_FRAMES: u64 = 1800;
+const DRAW_SUMMARY_FRAMES: u32 = 1800;
 
 fn rect_intersects_surface(rect: RectI, sw: i32, sh: i32) -> bool {
     if rect.w <= 0 || rect.h <= 0 {

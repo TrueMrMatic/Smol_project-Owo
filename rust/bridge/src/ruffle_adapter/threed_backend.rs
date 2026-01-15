@@ -420,6 +420,19 @@ impl RenderBackend for ThreeDSBackend {
 
         let text_shape = is_text_shape(&shape);
 
+        let (fill_count, stroke_count, fill_tris, stroke_tris) = if runlog::is_verbose() {
+            let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
+            let stroke_tris: u32 = strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
+            (
+                Some(fills.len()),
+                Some(strokes.len()),
+                Some(fill_tris),
+                Some(stroke_tris),
+            )
+        } else {
+            (None, None, None, None)
+        };
+
         self.caches.shapes.lock().unwrap().insert_meshes(
             key,
             bounds,
@@ -433,8 +446,6 @@ impl RenderBackend for ThreeDSBackend {
         );
 
         if runlog::is_verbose() {
-            let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
-            let stroke_tris: u32 = strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
             runlog::log_line(&format!(
                 "shape_summary id={} b={} {} {} {} fills={} fill_tris={} strokes={} stroke_tris={} tess_failed={} tess_partial={} stroke_failed={} stroke_partial={} text={}",
                 id,
@@ -442,10 +453,10 @@ impl RenderBackend for ThreeDSBackend {
                 bounds.y,
                 bounds.w,
                 bounds.h,
-                fills.len(),
-                fill_tris,
-                strokes.len(),
-                stroke_tris,
+                fill_count.unwrap_or(0),
+                fill_tris.unwrap_or(0),
+                stroke_count.unwrap_or(0),
+                stroke_tris.unwrap_or(0),
                 fill_failed,
                 fill_partial,
                 stroke_failed,
