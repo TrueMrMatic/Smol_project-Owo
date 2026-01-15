@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BUILD_ID: &str = "PATCH_003_UI_Y_HARD_FIX";
-const BASE_ID: &str = "PATCH_002_UI_SNAPSHOT_SAFETY";
+const BUILD_ID: &str = "PATCH_009_MASKS";
+const BASE_ID: &str = "PATCH_008_TEXT_VECTOR";
 
 /// Flush policy:
 /// - Boottrace is buffered and flushed at most every ~250ms or when buffer grows large.
@@ -96,18 +96,8 @@ fn pick_run_dir(root_path: &str) -> String {
     // Primary: keep runs next to your SWFs folder (what you requested in the protocol)
     let swf = swf_basename(root_path);
     let primary = format!("sdmc:/flash/_runs/{}/{}", BUILD_ID, swf);
-    if ensure_dir(&primary) { return primary; }
-
-    // Fallback: common place users check for homebrew artifacts
-    let fallback = format!("sdmc:/3ds/ruffle3ds_runs/{}/{}", BUILD_ID, swf);
-    let _ = ensure_dir("sdmc:/3ds/ruffle3ds_runs");
-    if ensure_dir(&fallback) { return fallback; }
-
-    // Last resort: root
-    let root = format!("sdmc:/ruffle3ds_runs/{}/{}", BUILD_ID, swf);
-    let _ = ensure_dir("sdmc:/ruffle3ds_runs");
-    let _ = ensure_dir(&root);
-    root
+    let _ = ensure_dir(&primary);
+    primary
 }
 
 pub fn init_for_swf(root_path: &str) {
@@ -131,7 +121,7 @@ pub fn init_for_swf(root_path: &str) {
         status_path: status_path.clone(),
         warnings_path: warnings_path.clone(),
         seq: 0,
-        verbosity: 1,
+        verbosity: 2,
         boottrace: BufWriter::new(boottrace_file),
         status: BufWriter::new(status_file),
         warnings: BufWriter::new(warnings_file),
@@ -156,7 +146,6 @@ pub fn init_for_swf(root_path: &str) {
 
     // A "last run" pointer file (so you don't have to hunt for the run folder)
     write_all_unbuffered("sdmc:/flash/_runs/LAST_RUN.txt", &format!("{}\n", rl.run_dir));
-    write_all_unbuffered("sdmc:/3ds/ruffle3ds_last_run.txt", &format!("{}\n", rl.run_dir));
 
     // Seed last stage
     write_all_unbuffered(&last_stage_path, "frame=0 stage=init\n");
@@ -323,9 +312,10 @@ pub fn drain_console(out: &mut [u8]) -> usize {
 pub fn set_verbosity(level: u8) {
     if let Some(lock) = RUNLOG.get() {
         if let Ok(mut rl) = lock.lock() {
-            rl.verbosity = level.min(2);
+            let requested = level.min(2);
+            rl.verbosity = 2;
             // Echo to both console and file
-            let msg = format!("runlog verbosity={}", rl.verbosity);
+            let msg = format!("runlog verbosity={} (requested={})", rl.verbosity, requested);
             rl.seq = rl.seq.wrapping_add(1);
             let seq = rl.seq;
             rl.bt_buf.push_str(&format!("[{:06}] INFO {}\n", seq, msg));
@@ -351,9 +341,9 @@ pub fn is_verbose() -> bool { get_verbosity() >= 2 }
 pub fn cycle_verbosity() {
     if let Some(lock) = RUNLOG.get() {
         if let Ok(rl) = lock.lock() {
-            let next = (rl.verbosity + 1) % 3;
+            let _ = rl;
             drop(rl);
-            set_verbosity(next);
+            set_verbosity(2);
         }
     }
 }

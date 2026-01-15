@@ -1,10 +1,18 @@
 use crate::render::device::RenderDevice;
-use crate::render::frame::{FramePacket, RectI, RenderCmd};
+use crate::render::frame::{FramePacket, RectI, RenderCmd, TexVertex};
 use crate::render::SharedCaches;
+use crate::runlog;
+use crate::util::config;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub struct CommandExecutor;
+
+static MESH_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
+static TEXTURE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
+static STROKE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
+static TEXT_MESH_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
+static MASK_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 
 fn rect_intersects_surface(rect: RectI, sw: i32, sh: i32) -> bool {
     if rect.w <= 0 || rect.h <= 0 {
@@ -57,6 +65,7 @@ impl CommandExecutor {
         // Lock caches once per frame.
         let bitmaps = caches.bitmaps.lock().unwrap();
         let shapes = caches.shapes.lock().unwrap();
+        let mut mask_stack: Vec<RectI> = Vec::new();
 
         for cmd in &packet.cmds {
             match cmd {
@@ -77,32 +86,208 @@ impl CommandExecutor {
                         }
                     }
 
+                    let mut used_fallback = false;
+                    let mut missing_mesh = false;
+                    let mut invalid_mesh = false;
                     if let Some(mesh) = shapes.get_fill_mesh(*shape_key, *fill_idx as usize) {
-                        // Fast-path: common rect mesh is much faster to draw with `fill_rect`.
-                        if let Some(local) = mesh_is_axis_aligned_rect(&mesh.verts, &mesh.indices) {
-                            let rect = RectI { x: local.x + *tx, y: local.y + *ty, w: local.w, h: local.h };
+                        let indices_ok = !mesh.indices.is_empty() && mesh.indices.len() % 3 == 0;
+                        let verts_ok = !mesh.verts.is_empty();
+                        if indices_ok && verts_ok {
+                            // Fast-path: common rect mesh is much faster to draw with `fill_rect`.
+                            if let Some(local) = mesh_is_axis_aligned_rect(&mesh.verts, &mesh.indices) {
+                                let rect = RectI { x: local.x + *tx, y: local.y + *ty, w: local.w, h: local.h };
+                                device.fill_rect(rect, cr, cg, cb);
+                                if *wireframe {
+                                    device.stroke_rect(rect, 255, 255, 255);
+                                }
+                            } else {
+                                device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, cr, cg, cb);
+                                if *wireframe {
+                                    device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
+                                }
+                            }
+                        } else {
+                            shapes.record_invalid_fill_mesh();
+                            invalid_mesh = true;
+                            used_fallback = true;
+                        }
+                    } else {
+                        shapes.record_missing_fill_mesh();
+                        missing_mesh = true;
+                        used_fallback = true;
+                    }
+
+                    if used_fallback {
+                        if missing_mesh || invalid_mesh {
+                            let n = MESH_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                            if n < 8 {
+                                let kind = if missing_mesh { "missing_mesh" } else { "invalid_mesh" };
+                                runlog::warn_line(&format!(
+                                    "fill_fallback {} shape={} fill={}",
+                                    kind, shape_key, fill_idx
+                                ));
+                            }
+                        }
+                        if let Some(b) = shapes.get_bounds(*shape_key) {
+                            shapes.record_bounds_fallback();
+                            // Safe fallback: bounds rect.
+                            let rect = RectI { x: b.x + *tx, y: b.y + *ty, w: b.w, h: b.h };
                             device.fill_rect(rect, cr, cg, cb);
                             if *wireframe {
                                 device.stroke_rect(rect, 255, 255, 255);
                             }
-                        } else {
+                        }
+                    }
+                }
+                RenderCmd::DrawTextSolidFill { shape_key, fill_idx, tx, ty, color_key, wireframe } => {
+                    let (cr, cg, cb) = color_from_key(*color_key);
+                    let mut used_fallback = false;
+                    let mut missing_mesh = false;
+                    let mut invalid_mesh = false;
+                    if let Some(mesh) = shapes.get_fill_mesh(*shape_key, *fill_idx as usize) {
+                        let indices_ok = !mesh.indices.is_empty() && mesh.indices.len() % 3 == 0;
+                        let verts_ok = !mesh.verts.is_empty();
+                        if indices_ok && verts_ok {
                             device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, cr, cg, cb);
                             if *wireframe {
                                 device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
                             }
+                        } else {
+                            shapes.record_invalid_fill_mesh();
+                            invalid_mesh = true;
+                            used_fallback = true;
                         }
-                    } else if let Some(b) = shapes.get_bounds(*shape_key) {
-                        // Safe fallback: bounds rect.
-                        let rect = RectI { x: b.x + *tx, y: b.y + *ty, w: b.w, h: b.h };
-                        device.fill_rect(rect, cr, cg, cb);
-                        if *wireframe {
-                            device.stroke_rect(rect, 255, 255, 255);
+                    } else {
+                        shapes.record_missing_fill_mesh();
+                        missing_mesh = true;
+                        used_fallback = true;
+                    }
+
+                    if used_fallback {
+                        let n = TEXT_MESH_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if n < 8 {
+                            let kind = if missing_mesh { "missing_mesh" } else { "invalid_mesh" };
+                            runlog::warn_line(&format!(
+                                "text_fill_fallback {} shape={} fill={}",
+                                kind, shape_key, fill_idx
+                            ));
+                        }
+                        if let Some(b) = shapes.get_bounds(*shape_key) {
+                            let rect = RectI { x: b.x + *tx, y: b.y + *ty, w: b.w, h: b.h };
+                            device.fill_rect(rect, cr, cg, cb);
+                            if *wireframe {
+                                device.stroke_rect(rect, 255, 255, 255);
+                            }
                         }
                     }
                 }
-                RenderCmd::BlitBitmap { x, y, bitmap_key } => {
+                RenderCmd::DrawShapeStroke { shape_key, stroke_idx, tx, ty, r, g, b, wireframe } => {
+                    let mut used_fallback = false;
+                    let mut missing_mesh = false;
+                    let mut invalid_mesh = false;
+                    if let Some(mesh) = shapes.get_stroke_mesh(*shape_key, *stroke_idx as usize) {
+                        let indices_ok = !mesh.indices.is_empty() && mesh.indices.len() % 3 == 0;
+                        let verts_ok = !mesh.verts.is_empty();
+                        if indices_ok && verts_ok {
+                            device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, *r, *g, *b);
+                            if *wireframe {
+                                device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
+                            }
+                        } else {
+                            shapes.record_invalid_stroke_mesh();
+                            invalid_mesh = true;
+                            used_fallback = true;
+                        }
+                    } else {
+                        shapes.record_missing_stroke_mesh();
+                        missing_mesh = true;
+                        used_fallback = true;
+                    }
+
+                    if used_fallback {
+                        let n = STROKE_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if n < 8 {
+                            let kind = if missing_mesh { "missing_mesh" } else { "invalid_mesh" };
+                            runlog::warn_line(&format!(
+                                "stroke_fallback {} shape={} stroke={}",
+                                kind, shape_key, stroke_idx
+                            ));
+                        }
+                        if let Some(bnd) = shapes.get_bounds(*shape_key) {
+                            shapes.record_stroke_bounds_fallback();
+                            let rect = RectI { x: bnd.x + *tx, y: bnd.y + *ty, w: bnd.w, h: bnd.h };
+                            device.stroke_rect(rect, *r, *g, *b);
+                        }
+                    }
+                }
+                RenderCmd::PushMaskRect { rect } => {
+                    if !config::masks_enabled() {
+                        let n = MASK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if n < 4 {
+                            runlog::warn_line("masks disabled; ignoring mask");
+                        }
+                        continue;
+                    }
+                    let mut next = *rect;
+                    if let Some(prev) = mask_stack.last() {
+                        let x0 = next.x.max(prev.x);
+                        let y0 = next.y.max(prev.y);
+                        let x1 = (next.x + next.w).min(prev.x + prev.w);
+                        let y1 = (next.y + next.h).min(prev.y + prev.h);
+                        next = RectI { x: x0, y: y0, w: (x1 - x0).max(0), h: (y1 - y0).max(0) };
+                    }
+                    mask_stack.push(next);
+                    device.set_scissor(Some(next));
+                }
+                RenderCmd::PushMaskShape { .. } => {
+                    let n = MASK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if n < 4 {
+                        runlog::warn_line("shape masks unsupported; ignoring");
+                    }
+                }
+                RenderCmd::PopMask => {
+                    if mask_stack.pop().is_some() {
+                        let rect = mask_stack.last().copied();
+                        device.set_scissor(rect);
+                    } else {
+                        let n = MASK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if n < 4 {
+                            runlog::warn_line("mask stack underflow");
+                        }
+                        device.set_scissor(None);
+                    }
+                }
+                RenderCmd::BlitBitmap { bitmap_key, transform, uv, color_transform } => {
                     if let Some(src) = bitmaps.get(*bitmap_key) {
-                        device.blit_rgba(*x, *y, src);
+                        let use_blit = transform.is_identity() && uv.is_full() && color_transform.is_none();
+                        if use_blit {
+                            device.blit_rgba(transform.tx.round() as i32, transform.ty.round() as i32, src);
+                            continue;
+                        }
+
+                        if !config::textured_bitmaps_enabled() {
+                            let n = TEXTURE_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                            if n < 4 {
+                                runlog::warn_line("textured_bitmaps disabled; skipping transformed bitmap");
+                            }
+                            continue;
+                        }
+
+                        let w = src.width as f32;
+                        let h = src.height as f32;
+                        let (x0, y0) = transform.apply(0.0, 0.0);
+                        let (x1, y1) = transform.apply(w, 0.0);
+                        let (x2, y2) = transform.apply(w, h);
+                        let (x3, y3) = transform.apply(0.0, h);
+
+                        let verts = [
+                            TexVertex { x: x0, y: y0, u: uv.u0, v: uv.v0 },
+                            TexVertex { x: x1, y: y1, u: uv.u1, v: uv.v0 },
+                            TexVertex { x: x2, y: y2, u: uv.u1, v: uv.v1 },
+                            TexVertex { x: x3, y: y3, u: uv.u0, v: uv.v1 },
+                        ];
+                        let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
+                        device.draw_tris_textured(&verts, &indices, src, *color_transform);
                     }
                 }
                 RenderCmd::DebugLoadingIndicator => {

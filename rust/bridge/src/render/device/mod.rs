@@ -1,6 +1,6 @@
 pub mod fb3ds;
 
-use crate::render::frame::{ClearColor, RectI};
+use crate::render::frame::{ClearColor, ColorTransform, RectI, TexVertex};
 use crate::render::cache::bitmaps::BitmapSurface;
 use crate::render::cache::shapes::Vertex2;
 
@@ -24,6 +24,18 @@ pub trait RenderDevice {
     ///
     /// Step 3 bootstrap: no scaling, nearest sampling, basic alpha blending.
     fn blit_rgba(&mut self, x: i32, y: i32, src: &BitmapSurface);
+
+    /// Set or clear a scissor rectangle for masking.
+    fn set_scissor(&mut self, rect: Option<RectI>);
+
+    /// Draw textured triangles with nearest-neighbor sampling.
+    fn draw_tris_textured(
+        &mut self,
+        verts: &[TexVertex],
+        indices: &[u16],
+        src: &BitmapSurface,
+        color_transform: Option<ColorTransform>,
+    );
 
     /// Fill a set of triangles with an opaque solid color.
     ///
