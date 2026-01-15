@@ -1,5 +1,5 @@
 use crate::render::device::RenderDevice;
-use crate::render::frame::{FramePacket, RectI, RenderCmd, TexVertex};
+use crate::render::frame::{FramePacket, Matrix2D, RectI, RenderCmd, TexVertex};
 use crate::render::SharedCaches;
 use crate::runlog;
 use crate::util::config;
@@ -34,6 +34,41 @@ fn rect_intersects_surface(rect: RectI, sw: i32, sh: i32) -> bool {
     let x1 = rect.x + rect.w;
     let y1 = rect.y + rect.h;
     !(x1 <= 0 || y1 <= 0 || x0 >= sw || y0 >= sh)
+}
+
+fn rect_aabb_transformed(rect: RectI, transform: Matrix2D) -> RectI {
+    let x0 = rect.x as f32;
+    let y0 = rect.y as f32;
+    let x1 = (rect.x + rect.w) as f32;
+    let y1 = (rect.y + rect.h) as f32;
+
+    let (tx0, ty0) = transform.apply(x0, y0);
+    let (tx1, ty1) = transform.apply(x1, y0);
+    let (tx2, ty2) = transform.apply(x1, y1);
+    let (tx3, ty3) = transform.apply(x0, y1);
+
+    let minx = tx0.min(tx1.min(tx2.min(tx3)));
+    let maxx = tx0.max(tx1.max(tx2.max(tx3)));
+    let miny = ty0.min(ty1.min(ty2.min(ty3)));
+    let maxy = ty0.max(ty1.max(ty2.max(ty3)));
+
+    let x = minx.floor() as i32;
+    let y = miny.floor() as i32;
+    let w = (maxx.ceil() as i32).saturating_sub(x);
+    let h = (maxy.ceil() as i32).saturating_sub(y);
+    RectI { x, y, w, h }
+}
+
+fn is_integer_translation(transform: Matrix2D) -> Option<(i32, i32)> {
+    if !transform.is_translation() {
+        return None;
+    }
+    let tx = transform.tx.round();
+    let ty = transform.ty.round();
+    if (transform.tx - tx).abs() <= 0.0001 && (transform.ty - ty).abs() <= 0.0001 {
+        return Some((tx as i32, ty as i32));
+    }
+    None
 }
 
 fn mesh_is_axis_aligned_rect(mesh_verts: &[crate::render::cache::shapes::Vertex2], indices: &[u16]) -> Option<RectI> {
@@ -91,17 +126,18 @@ impl CommandExecutor {
                         device.stroke_rect(*rect, 255, 255, 255);
                     }
                 }
-                RenderCmd::DrawShapeSolidFill { shape_key, fill_idx, tx, ty, color_key, wireframe } => {
+                RenderCmd::DrawShapeSolidFill { shape_key, fill_idx, transform, color_key, wireframe } => {
                     FILL_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
                     let (cr, cg, cb) = color_from_key(*color_key);
-                    // Early reject by translated bounds (very common win for offscreen sprites).
+                    // Early reject by transformed bounds (very common win for offscreen sprites).
                     if let Some(b) = shapes.get_bounds(*shape_key) {
-                        let tr = RectI { x: b.x + *tx, y: b.y + *ty, w: b.w, h: b.h };
+                        let tr = rect_aabb_transformed(b, *transform);
                         if !rect_intersects_surface(tr, sw, sh) {
                             continue;
                         }
                     }
 
+                    let int_translation = is_integer_translation(*transform);
                     let mut used_fallback = false;
                     let mut missing_mesh = false;
                     let mut invalid_mesh = false;
@@ -111,17 +147,56 @@ impl CommandExecutor {
                         if indices_ok && verts_ok {
                             // Fast-path: common rect mesh is much faster to draw with `fill_rect`.
                             if let Some(local) = mesh_is_axis_aligned_rect(&mesh.verts, &mesh.indices) {
-                                rect_fastpath = rect_fastpath.saturating_add(1);
-                                let rect = RectI { x: local.x + *tx, y: local.y + *ty, w: local.w, h: local.h };
-                                device.fill_rect(rect, cr, cg, cb);
+                                if let Some((tx, ty)) = int_translation {
+                                    rect_fastpath = rect_fastpath.saturating_add(1);
+                                    let rect = RectI { x: local.x + tx, y: local.y + ty, w: local.w, h: local.h };
+                                    device.fill_rect(rect, cr, cg, cb);
+                                    if *wireframe {
+                                        device.stroke_rect(rect, 255, 255, 255);
+                                    }
+                                } else if transform.is_axis_aligned() {
+                                    rect_fastpath = rect_fastpath.saturating_add(1);
+                                    let x0 = local.x as f32;
+                                    let y0 = local.y as f32;
+                                    let x1 = (local.x + local.w) as f32;
+                                    let y1 = (local.y + local.h) as f32;
+                                    let tx0 = transform.a * x0 + transform.tx;
+                                    let tx1 = transform.a * x1 + transform.tx;
+                                    let ty0 = transform.d * y0 + transform.ty;
+                                    let ty1 = transform.d * y1 + transform.ty;
+                                    let minx = tx0.min(tx1);
+                                    let maxx = tx0.max(tx1);
+                                    let miny = ty0.min(ty1);
+                                    let maxy = ty0.max(ty1);
+                                    let x = minx.floor() as i32;
+                                    let y = miny.floor() as i32;
+                                    let w = (maxx.ceil() as i32).saturating_sub(x);
+                                    let h = (maxy.ceil() as i32).saturating_sub(y);
+                                    if w > 0 && h > 0 {
+                                        let rect = RectI { x, y, w, h };
+                                        device.fill_rect(rect, cr, cg, cb);
+                                        if *wireframe {
+                                            device.stroke_rect(rect, 255, 255, 255);
+                                        }
+                                    }
+                                } else {
+                                    mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
+                                    device.fill_tris_solid_affine(&mesh.verts, &mesh.indices, *transform, cr, cg, cb);
+                                    if *wireframe {
+                                        device.draw_tris_wireframe_affine(&mesh.verts, &mesh.indices, *transform, 255, 255, 255);
+                                    }
+                                }
+                            } else if let Some((tx, ty)) = int_translation {
+                                mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
+                                device.fill_tris_solid(&mesh.verts, &mesh.indices, tx, ty, cr, cg, cb);
                                 if *wireframe {
-                                    device.stroke_rect(rect, 255, 255, 255);
+                                    device.draw_tris_wireframe(&mesh.verts, &mesh.indices, tx, ty, 255, 255, 255);
                                 }
                             } else {
                                 mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
-                                device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, cr, cg, cb);
+                                device.fill_tris_solid_affine(&mesh.verts, &mesh.indices, *transform, cr, cg, cb);
                                 if *wireframe {
-                                    device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
+                                    device.draw_tris_wireframe_affine(&mesh.verts, &mesh.indices, *transform, 255, 255, 255);
                                 }
                             }
                         } else {
@@ -151,7 +226,7 @@ impl CommandExecutor {
                             shapes.record_bounds_fallback();
                             bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             // Safe fallback: bounds rect.
-                            let rect = RectI { x: b.x + *tx, y: b.y + *ty, w: b.w, h: b.h };
+                            let rect = rect_aabb_transformed(b, *transform);
                             device.fill_rect(rect, cr, cg, cb);
                             if *wireframe {
                                 device.stroke_rect(rect, 255, 255, 255);
@@ -159,9 +234,10 @@ impl CommandExecutor {
                         }
                     }
                 }
-                RenderCmd::DrawTextSolidFill { shape_key, fill_idx, tx, ty, color_key, wireframe } => {
+                RenderCmd::DrawTextSolidFill { shape_key, fill_idx, transform, color_key, wireframe } => {
                     TEXT_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
                     let (cr, cg, cb) = color_from_key(*color_key);
+                    let int_translation = is_integer_translation(*transform);
                     let mut used_fallback = false;
                     let mut missing_mesh = false;
                     let mut invalid_mesh = false;
@@ -170,9 +246,16 @@ impl CommandExecutor {
                         let verts_ok = !mesh.verts.is_empty();
                         if indices_ok && verts_ok {
                             mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
-                            device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, cr, cg, cb);
-                            if *wireframe {
-                                device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
+                            if let Some((tx, ty)) = int_translation {
+                                device.fill_tris_solid(&mesh.verts, &mesh.indices, tx, ty, cr, cg, cb);
+                                if *wireframe {
+                                    device.draw_tris_wireframe(&mesh.verts, &mesh.indices, tx, ty, 255, 255, 255);
+                                }
+                            } else {
+                                device.fill_tris_solid_affine(&mesh.verts, &mesh.indices, *transform, cr, cg, cb);
+                                if *wireframe {
+                                    device.draw_tris_wireframe_affine(&mesh.verts, &mesh.indices, *transform, 255, 255, 255);
+                                }
                             }
                         } else {
                             shapes.record_invalid_fill_mesh();
@@ -197,7 +280,7 @@ impl CommandExecutor {
                         }
                         if let Some(b) = shapes.get_bounds(*shape_key) {
                             bounds_fallbacks = bounds_fallbacks.saturating_add(1);
-                            let rect = RectI { x: b.x + *tx, y: b.y + *ty, w: b.w, h: b.h };
+                            let rect = rect_aabb_transformed(b, *transform);
                             device.fill_rect(rect, cr, cg, cb);
                             if *wireframe {
                                 device.stroke_rect(rect, 255, 255, 255);
@@ -205,8 +288,9 @@ impl CommandExecutor {
                         }
                     }
                 }
-                RenderCmd::DrawShapeStroke { shape_key, stroke_idx, tx, ty, r, g, b, wireframe } => {
+                RenderCmd::DrawShapeStroke { shape_key, stroke_idx, transform, r, g, b, wireframe } => {
                     STROKE_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
+                    let int_translation = is_integer_translation(*transform);
                     let mut used_fallback = false;
                     let mut missing_mesh = false;
                     let mut invalid_mesh = false;
@@ -215,9 +299,16 @@ impl CommandExecutor {
                         let verts_ok = !mesh.verts.is_empty();
                         if indices_ok && verts_ok {
                             mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
-                            device.fill_tris_solid(&mesh.verts, &mesh.indices, *tx, *ty, *r, *g, *b);
-                            if *wireframe {
-                                device.draw_tris_wireframe(&mesh.verts, &mesh.indices, *tx, *ty, 255, 255, 255);
+                            if let Some((tx, ty)) = int_translation {
+                                device.fill_tris_solid(&mesh.verts, &mesh.indices, tx, ty, *r, *g, *b);
+                                if *wireframe {
+                                    device.draw_tris_wireframe(&mesh.verts, &mesh.indices, tx, ty, 255, 255, 255);
+                                }
+                            } else {
+                                device.fill_tris_solid_affine(&mesh.verts, &mesh.indices, *transform, *r, *g, *b);
+                                if *wireframe {
+                                    device.draw_tris_wireframe_affine(&mesh.verts, &mesh.indices, *transform, 255, 255, 255);
+                                }
                             }
                         } else {
                             shapes.record_invalid_stroke_mesh();
@@ -243,7 +334,7 @@ impl CommandExecutor {
                         if let Some(bnd) = shapes.get_bounds(*shape_key) {
                             shapes.record_stroke_bounds_fallback();
                             bounds_fallbacks = bounds_fallbacks.saturating_add(1);
-                            let rect = RectI { x: bnd.x + *tx, y: bnd.y + *ty, w: bnd.w, h: bnd.h };
+                            let rect = rect_aabb_transformed(bnd, *transform);
                             device.stroke_rect(rect, *r, *g, *b);
                         }
                     }

@@ -1,5 +1,5 @@
 use crate::render::device::RenderDevice;
-use crate::render::frame::{ClearColor, ColorTransform, RectI, TexVertex};
+use crate::render::frame::{ClearColor, ColorTransform, Matrix2D, RectI, TexVertex};
 use crate::render::cache::bitmaps::BitmapSurface;
 use crate::render::cache::shapes::Vertex2;
 
@@ -335,6 +335,11 @@ impl FbView {
         let ax = a.x + tx; let ay = a.y + ty;
         let bx = b.x + tx; let by = b.y + ty;
         let cx = c.x + tx; let cy = c.y + ty;
+        self.fill_triangle_solid_xy(ax, ay, bx, by, cx, cy, r, g, bcol);
+    }
+
+    #[inline(always)]
+    unsafe fn fill_triangle_solid_xy(&self, ax: i32, ay: i32, bx: i32, by: i32, cx: i32, cy: i32, r: u8, g: u8, bcol: u8) {
 
         // Degenerate reject (area == 0).
         // This avoids wasting time on tiny/flat triangles produced by tessellation.
@@ -429,6 +434,56 @@ impl FbView {
         }
     }
 
+    unsafe fn fill_tris_solid_affine(&self, verts: &[Vertex2], indices: &[u16], transform: Matrix2D, r: u8, g: u8, b: u8) {
+        if transform.is_translation() {
+            let tx = transform.tx.round() as i32;
+            let ty = transform.ty.round() as i32;
+            self.fill_tris_solid(verts, indices, tx, ty, r, g, b);
+            return;
+        }
+
+        let axis_aligned = transform.is_axis_aligned();
+        let a = transform.a;
+        let b0 = transform.b;
+        let c = transform.c;
+        let d = transform.d;
+        let tx = transform.tx;
+        let ty = transform.ty;
+
+        let mut i = 0usize;
+        while i + 2 < indices.len() {
+            let ia = indices[i] as usize;
+            let ib = indices[i + 1] as usize;
+            let ic = indices[i + 2] as usize;
+            i += 3;
+
+            if ia >= verts.len() || ib >= verts.len() || ic >= verts.len() { continue; }
+            let v0 = verts[ia];
+            let v1 = verts[ib];
+            let v2 = verts[ic];
+
+            let (ax, ay, bx, by, cx, cy) = if axis_aligned {
+                let ax = (a * v0.x as f32 + tx).round() as i32;
+                let ay = (d * v0.y as f32 + ty).round() as i32;
+                let bx = (a * v1.x as f32 + tx).round() as i32;
+                let by = (d * v1.y as f32 + ty).round() as i32;
+                let cx = (a * v2.x as f32 + tx).round() as i32;
+                let cy = (d * v2.y as f32 + ty).round() as i32;
+                (ax, ay, bx, by, cx, cy)
+            } else {
+                let ax = (a * v0.x as f32 + c * v0.y as f32 + tx).round() as i32;
+                let ay = (b0 * v0.x as f32 + d * v0.y as f32 + ty).round() as i32;
+                let bx = (a * v1.x as f32 + c * v1.y as f32 + tx).round() as i32;
+                let by = (b0 * v1.x as f32 + d * v1.y as f32 + ty).round() as i32;
+                let cx = (a * v2.x as f32 + c * v2.y as f32 + tx).round() as i32;
+                let cy = (b0 * v2.x as f32 + d * v2.y as f32 + ty).round() as i32;
+                (ax, ay, bx, by, cx, cy)
+            };
+
+            self.fill_triangle_solid_xy(ax, ay, bx, by, cx, cy, r, g, b);
+        }
+    }
+
     #[inline(always)]
     unsafe fn draw_line(&self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, r: u8, g: u8, b: u8) {
         // Bresenham
@@ -466,6 +521,58 @@ impl FbView {
             let ax = a.x + tx; let ay = a.y + ty;
             let bx = b0.x + tx; let by = b0.y + ty;
             let cx = c.x + tx; let cy = c.y + ty;
+
+            self.draw_line(ax, ay, bx, by, r, g, b);
+            self.draw_line(bx, by, cx, cy, r, g, b);
+            self.draw_line(cx, cy, ax, ay, r, g, b);
+        }
+    }
+
+    unsafe fn draw_tris_wireframe_affine(&self, verts: &[Vertex2], indices: &[u16], transform: Matrix2D, r: u8, g: u8, b: u8) {
+        if transform.is_translation() {
+            let tx = transform.tx.round() as i32;
+            let ty = transform.ty.round() as i32;
+            self.draw_tris_wireframe(verts, indices, tx, ty, r, g, b);
+            return;
+        }
+
+        let axis_aligned = transform.is_axis_aligned();
+        let a = transform.a;
+        let b0 = transform.b;
+        let c = transform.c;
+        let d = transform.d;
+        let tx = transform.tx;
+        let ty = transform.ty;
+
+        let mut i = 0usize;
+        while i + 2 < indices.len() {
+            let ia = indices[i] as usize;
+            let ib = indices[i + 1] as usize;
+            let ic = indices[i + 2] as usize;
+            i += 3;
+
+            if ia >= verts.len() || ib >= verts.len() || ic >= verts.len() { continue; }
+            let v0 = verts[ia];
+            let v1 = verts[ib];
+            let v2 = verts[ic];
+
+            let (ax, ay, bx, by, cx, cy) = if axis_aligned {
+                let ax = (a * v0.x as f32 + tx).round() as i32;
+                let ay = (d * v0.y as f32 + ty).round() as i32;
+                let bx = (a * v1.x as f32 + tx).round() as i32;
+                let by = (d * v1.y as f32 + ty).round() as i32;
+                let cx = (a * v2.x as f32 + tx).round() as i32;
+                let cy = (d * v2.y as f32 + ty).round() as i32;
+                (ax, ay, bx, by, cx, cy)
+            } else {
+                let ax = (a * v0.x as f32 + c * v0.y as f32 + tx).round() as i32;
+                let ay = (b0 * v0.x as f32 + d * v0.y as f32 + ty).round() as i32;
+                let bx = (a * v1.x as f32 + c * v1.y as f32 + tx).round() as i32;
+                let by = (b0 * v1.x as f32 + d * v1.y as f32 + ty).round() as i32;
+                let cx = (a * v2.x as f32 + c * v2.y as f32 + tx).round() as i32;
+                let cy = (b0 * v2.x as f32 + d * v2.y as f32 + ty).round() as i32;
+                (ax, ay, bx, by, cx, cy)
+            };
 
             self.draw_line(ax, ay, bx, by, r, g, b);
             self.draw_line(bx, by, cx, cy, r, g, b);
@@ -601,6 +708,34 @@ impl RenderDevice for Fb3dsDevice {
     fn draw_tris_wireframe(&mut self, verts: &[Vertex2], indices: &[u16], tx: i32, ty: i32, r: u8, g: u8, b: u8) {
         if let Some(fb) = self.fb {
             unsafe { fb.draw_tris_wireframe(verts, indices, tx, ty, r, g, b); }
+        }
+    }
+
+    fn fill_tris_solid_affine(
+        &mut self,
+        verts: &[Vertex2],
+        indices: &[u16],
+        transform: Matrix2D,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) {
+        if let Some(fb) = self.fb {
+            unsafe { fb.fill_tris_solid_affine(verts, indices, transform, r, g, b); }
+        }
+    }
+
+    fn draw_tris_wireframe_affine(
+        &mut self,
+        verts: &[Vertex2],
+        indices: &[u16],
+        transform: Matrix2D,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) {
+        if let Some(fb) = self.fb {
+            unsafe { fb.draw_tris_wireframe_affine(verts, indices, transform, r, g, b); }
         }
     }
 

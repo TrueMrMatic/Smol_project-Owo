@@ -69,6 +69,45 @@ fn debug_color_from_key(mut k: u64) -> (u8, u8, u8) {
     (r, g, b)
 }
 
+fn rect_aabb_transformed(rect: RectI, transform: Matrix2D) -> RectI {
+    let x0 = rect.x as f32;
+    let y0 = rect.y as f32;
+    let x1 = (rect.x + rect.w) as f32;
+    let y1 = (rect.y + rect.h) as f32;
+
+    if transform.is_axis_aligned() {
+        let tx0 = transform.a * x0 + transform.tx;
+        let tx1 = transform.a * x1 + transform.tx;
+        let ty0 = transform.d * y0 + transform.ty;
+        let ty1 = transform.d * y1 + transform.ty;
+        let minx = tx0.min(tx1);
+        let maxx = tx0.max(tx1);
+        let miny = ty0.min(ty1);
+        let maxy = ty0.max(ty1);
+        let x = minx.floor() as i32;
+        let y = miny.floor() as i32;
+        let w = (maxx.ceil() as i32).saturating_sub(x);
+        let h = (maxy.ceil() as i32).saturating_sub(y);
+        return RectI { x, y, w, h };
+    }
+
+    let (tx0, ty0) = transform.apply(x0, y0);
+    let (tx1, ty1) = transform.apply(x1, y0);
+    let (tx2, ty2) = transform.apply(x1, y1);
+    let (tx3, ty3) = transform.apply(x0, y1);
+
+    let minx = tx0.min(tx1.min(tx2.min(tx3)));
+    let maxx = tx0.max(tx1.max(tx2.max(tx3)));
+    let miny = ty0.min(ty1.min(ty2.min(ty3)));
+    let maxy = ty0.max(ty1.max(ty2.max(ty3)));
+
+    let x = minx.floor() as i32;
+    let y = miny.floor() as i32;
+    let w = (maxx.ceil() as i32).saturating_sub(x);
+    let h = (maxy.ceil() as i32).saturating_sub(y);
+    RectI { x, y, w, h }
+}
+
 fn is_text_shape(shape: &DistilledShape<'_>) -> bool {
     shape.id == 0 && shape.paths.iter().all(|p| matches!(p, DrawPath::Fill { .. }))
 }
@@ -584,13 +623,19 @@ impl RenderBackend for ThreeDSBackend {
                     s.seen_real_draw = true;
 
                     let key: ShapeKey = Arc::as_ptr(&shape.0) as *const () as ShapeKey;
-                    let tx = transform.matrix.tx.to_pixels() as i32;
-                    let ty = transform.matrix.ty.to_pixels() as i32;
+                    let matrix = Matrix2D {
+                        a: transform.matrix.a,
+                        b: transform.matrix.b,
+                        c: transform.matrix.c,
+                        d: transform.matrix.d,
+                        tx: transform.matrix.tx.to_pixels() as f32,
+                        ty: transform.matrix.ty.to_pixels() as f32,
+                    };
 
                     if let Some(b) = shapes_cache.get_bounds(key) {
-                        // Per-shape early reject using translated bounds.
+                        // Per-shape early reject using transformed bounds.
                         // This avoids pushing per-fill commands for offscreen sprites.
-                        let tr = RectI { x: b.x + tx, y: b.y + ty, w: b.w, h: b.h };
+                        let tr = rect_aabb_transformed(b, matrix);
                         if tr.x + tr.w <= 0 || tr.y + tr.h <= 0 || tr.x >= 400 || tr.y >= 240 {
                             continue;
                         }
@@ -615,8 +660,7 @@ impl RenderBackend for ThreeDSBackend {
                                     s.frame.cmds.push(RenderCmd::DrawTextSolidFill {
                                         shape_key: key,
                                         fill_idx: 0,
-                                        tx,
-                                        ty,
+                                        transform: matrix,
                                         color_key: key as u64,
                                         wireframe: wire_once,
                                     });
@@ -636,8 +680,7 @@ impl RenderBackend for ThreeDSBackend {
                                     s.frame.cmds.push(RenderCmd::DrawTextSolidFill {
                                         shape_key: key,
                                         fill_idx: fi as u16,
-                                        tx,
-                                        ty,
+                                        transform: matrix,
                                         color_key,
                                         wireframe: wire_once,
                                     });
@@ -645,8 +688,7 @@ impl RenderBackend for ThreeDSBackend {
                                     s.frame.cmds.push(RenderCmd::DrawShapeSolidFill {
                                         shape_key: key,
                                         fill_idx: fi as u16,
-                                        tx,
-                                        ty,
+                                        transform: matrix,
                                         color_key,
                                         wireframe: wire_once,
                                     });
@@ -683,8 +725,7 @@ impl RenderBackend for ThreeDSBackend {
                                 s.frame.cmds.push(RenderCmd::DrawShapeStroke {
                                     shape_key: key,
                                     stroke_idx: si as u16,
-                                    tx,
-                                    ty,
+                                    transform: matrix,
                                     r: color.0,
                                     g: color.1,
                                     b: color.2,
@@ -700,8 +741,7 @@ impl RenderBackend for ThreeDSBackend {
                             s.frame.cmds.push(RenderCmd::DrawShapeStroke {
                                 shape_key: key,
                                 stroke_idx: 0,
-                                tx,
-                                ty,
+                                transform: matrix,
                                 r,
                                 g,
                                 b,

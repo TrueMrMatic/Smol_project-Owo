@@ -48,6 +48,13 @@ impl Matrix2D {
     pub fn is_axis_aligned(&self) -> bool {
         approx_eq_f32(self.b, 0.0) && approx_eq_f32(self.c, 0.0)
     }
+
+    pub fn is_translation(&self) -> bool {
+        approx_eq_f32(self.a, 1.0)
+            && approx_eq_f32(self.d, 1.0)
+            && approx_eq_f32(self.b, 0.0)
+            && approx_eq_f32(self.c, 0.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -123,12 +130,11 @@ pub enum RenderCmd {
     /// emit one draw command per fill.
     ///
     /// The executor will look up the mesh by `(shape_key, fill_idx)` in `SharedCaches.shapes`.
-    /// Translation `(tx, ty)` is applied at draw time (no per-frame allocations).
+    /// The full affine `transform` is applied at draw time (no per-frame allocations).
     DrawShapeSolidFill {
         shape_key: usize,
         fill_idx: u16,
-        tx: i32,
-        ty: i32,
+        transform: Matrix2D,
         color_key: u64,
         wireframe: bool,
     },
@@ -137,8 +143,7 @@ pub enum RenderCmd {
     DrawTextSolidFill {
         shape_key: usize,
         fill_idx: u16,
-        tx: i32,
-        ty: i32,
+        transform: Matrix2D,
         color_key: u64,
         wireframe: bool,
     },
@@ -147,8 +152,7 @@ pub enum RenderCmd {
     DrawShapeStroke {
         shape_key: usize,
         stroke_idx: u16,
-        tx: i32,
-        ty: i32,
+        transform: Matrix2D,
         r: u8,
         g: u8,
         b: u8,
