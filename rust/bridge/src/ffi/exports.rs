@@ -148,3 +148,12 @@ pub extern "C" fn bridge_set_wireframe_hold_ctx(ctx: *mut BridgeContext, enabled
     let ctx = unsafe { &mut *ctx };
     ctx.engine.set_wireframe_hold(enabled != 0);
 }
+
+#[no_mangle]
+pub extern "C" fn bridge_toggle_affine_debug_overlay_ctx(ctx: *mut BridgeContext) -> u32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    let ctx = unsafe { &mut *ctx };
+    if ctx.engine.toggle_debug_affine_overlay() { 1 } else { 0 }
+}

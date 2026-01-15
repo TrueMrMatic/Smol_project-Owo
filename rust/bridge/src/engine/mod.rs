@@ -10,6 +10,8 @@ use ruffle_video::null::NullVideoBackend;
 use crate::ffi::fileio::read_file_bytes;
 use crate::ruffle_adapter::ThreeDSBackend;
 use crate::render::{FramePacket, RenderCmd, Renderer, SharedCaches};
+#[cfg(debug_assertions)]
+use crate::render::Matrix2D;
 use crate::runlog;
 
 /// High-level engine state, owned by the C-side handle.
@@ -47,15 +49,36 @@ impl Engine {
         // Backend shared between renderer/navigator/ui/log/storage.
         let backend = ThreeDSBackend::new(caches.clone());
 
-        let player = PlayerBuilder::new()
-            .with_renderer(backend.clone())
-            .with_audio(NullAudioBackend::new())
-            .with_navigator(backend.clone())
-            .with_storage(Box::new(backend.clone()))
-            .with_video(NullVideoBackend::new())
-            .with_log(backend.clone())
-            .with_ui(backend.clone())
-            .build();
+        runlog::log_important("init: player_builder");
+        let mut builder = PlayerBuilder::new();
+        runlog::log_important("init: renderer backend");
+        builder = builder.with_renderer(backend.clone());
+        runlog::log_important("init: audio backend");
+        builder = builder.with_audio(NullAudioBackend::new());
+        #[cfg(feature = "navigator")]
+        {
+            runlog::log_important("init: navigator backend");
+            builder = builder.with_navigator(backend.clone());
+        }
+        #[cfg(not(feature = "navigator"))]
+        {
+            runlog::log_important("init: navigator backend disabled");
+        }
+        #[cfg(feature = "storage")]
+        {
+            runlog::log_important("init: storage backend");
+            builder = builder.with_storage(Box::new(backend.clone()));
+        }
+        #[cfg(not(feature = "storage"))]
+        {
+            runlog::log_important("init: storage backend disabled");
+        }
+        runlog::log_important("init: video backend");
+        builder = builder.with_video(NullVideoBackend::new());
+        runlog::log_important("init: log backend");
+        builder = builder.with_log(backend.clone());
+        runlog::log_important("init: ui backend");
+        let player = builder.with_ui(backend.clone()).build();
 
         // Load SWF.
         match SwfMovie::from_data(&movie_bytes, root_file_url.clone(), None) {
@@ -146,6 +169,18 @@ impl Engine {
             self.scratch_packet.cmds.push(RenderCmd::DebugLoadingIndicator);
         }
 
+        #[cfg(debug_assertions)]
+        if self.backend.debug_affine_overlay_enabled() {
+            let translate = Matrix2D { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 20.0, ty: 20.0 };
+            let scale = Matrix2D { a: 1.4, b: 0.0, c: 0.0, d: 0.8, tx: 120.0, ty: 20.0 };
+            let rotate = Matrix2D { a: 0.8660254, b: 0.5, c: -0.5, d: 0.8660254, tx: 230.0, ty: 40.0 };
+            let shear = Matrix2D { a: 1.0, b: 0.25, c: 0.35, d: 1.0, tx: 60.0, ty: 130.0 };
+            self.scratch_packet.cmds.push(RenderCmd::DebugAffineRect { transform: translate, r: 220, g: 80, b: 80 });
+            self.scratch_packet.cmds.push(RenderCmd::DebugAffineRect { transform: scale, r: 80, g: 200, b: 80 });
+            self.scratch_packet.cmds.push(RenderCmd::DebugAffineRect { transform: rotate, r: 80, g: 120, b: 220 });
+            self.scratch_packet.cmds.push(RenderCmd::DebugAffineRect { transform: shear, r: 220, g: 200, b: 80 });
+        }
+
         runlog::stage("renderer.render", self.frame_counter);
         self.renderer.render(&self.scratch_packet);
         runlog::stage("present", self.frame_counter);
@@ -174,6 +209,10 @@ impl Engine {
 
     pub fn set_wireframe_hold(&mut self, enabled: bool) {
         self.backend.set_wireframe_hold(enabled);
+    }
+
+    pub fn toggle_debug_affine_overlay(&mut self) -> bool {
+        self.backend.toggle_debug_affine_overlay()
     }
 
     pub fn is_ready(&self) -> bool {
