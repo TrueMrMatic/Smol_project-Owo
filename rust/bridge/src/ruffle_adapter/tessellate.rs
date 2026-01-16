@@ -6,10 +6,12 @@
 //! - Output types must be renderer-owned: `Vec<Vertex2>` + `Vec<u16>`.
 //! - No per-frame allocations: tessellation runs at **register_shape** time.
 
-use crate::render::cache::shapes::{FillMesh, StrokeMesh, Vertex2};
+use crate::render::cache::shapes::{FillMesh, FillPaint, StrokeMesh, Vertex2};
 use crate::runlog;
 use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath, FillRule};
 use ruffle_core::swf::{FillStyle, LineJoinStyle};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 // We use earcut for robust polygon-with-holes triangulation.
 // This runs at registration time, so the CPU cost is acceptable.
@@ -20,11 +22,18 @@ pub enum TessError {
     NoContours,
     TooManyVerts,
     EarcutFailed,
+    Timeout,
 }
 
 const MAX_POINTS_PER_FILL: usize = 4096;
 const MAX_POINTS_PER_STROKE: usize = 4096;
 const MAX_VERTS_PER_MESH: usize = u16::MAX as usize;
+const MAX_CONTOURS_PER_FILL: usize = 64;
+const MAX_TOTAL_CONTAINMENT_TESTS: usize = 4096;
+const FILL_PATH_BUDGET_MS: u64 = 60;
+const MAX_UNSUPPORTED_FILL_WARNINGS: u32 = 8;
+
+static UNSUPPORTED_FILL_WARNINGS: AtomicU32 = AtomicU32::new(0);
 
 /// Output of shape tessellation.
 ///
@@ -34,6 +43,10 @@ pub struct TessOutput {
     pub fills: Vec<FillMesh>,
     /// True if at least one fill failed to tessellate.
     pub any_failed: bool,
+    pub group_used_more_correct: u32,
+    pub group_used_fast: u32,
+    pub group_used_trivial: u32,
+    pub unsupported_fill_paints: u32,
 }
 
 #[derive(Debug)]
@@ -52,14 +65,39 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
     let mut fills: Vec<FillMesh> = Vec::new();
     let mut any_failed = false;
     let mut fill_paths = 0usize;
+    let mut group_used_more_correct: u32 = 0;
+    let mut group_used_fast: u32 = 0;
+    let mut group_used_trivial: u32 = 0;
+    let mut unsupported_fill_paints: u32 = 0;
+    let mut logged_cap_contours = false;
+    let mut logged_cap_tests = false;
+    let mut logged_timeout = false;
 
     let tol_px = tessellation_tolerance_px(shape);
     for path in &shape.paths {
-        let (commands, rule) = match path {
-            DrawPath::Fill { commands, winding_rule, .. } => (commands, *winding_rule),
+        let fill_idx = fill_paths.saturating_add(1);
+        let (commands, rule, paint) = match path {
+            DrawPath::Fill { commands, winding_rule, style, .. } => {
+                let paint = match style {
+                    FillStyle::Color(color) => FillPaint::SolidRGBA(color.r, color.g, color.b, color.a),
+                    _ => {
+                        unsupported_fill_paints = unsupported_fill_paints.saturating_add(1);
+                        let count = UNSUPPORTED_FILL_WARNINGS.fetch_add(1, Ordering::Relaxed);
+                        if count < MAX_UNSUPPORTED_FILL_WARNINGS {
+                            runlog::warn_line(&format!(
+                                "fill_style unsupported shape={} fill_path={}",
+                                shape_id, fill_idx
+                            ));
+                        }
+                        FillPaint::Unsupported
+                    }
+                };
+                (commands, *winding_rule, paint)
+            }
             _ => continue, // fills-only Step 2A
         };
-        fill_paths = fill_paths.saturating_add(1);
+        fill_paths = fill_idx;
+        let fill_start = Instant::now();
 
         let mut out_verts: Vec<Vertex2> = Vec::new();
         let mut out_indices: Vec<u16> = Vec::new();
@@ -75,7 +113,19 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
             any_failed = true;
             continue;
         }
+        let contour_count = contours.len();
         let total_points: usize = contours.iter().map(|c| c.len()).sum();
+        if contour_count > MAX_CONTOURS_PER_FILL {
+            any_failed = true;
+            if !logged_cap_contours {
+                logged_cap_contours = true;
+                runlog::warn_line(&format!(
+                    "tess_guard cap_contours shape={} contours={} points={}",
+                    shape_id, contour_count, total_points
+                ));
+            }
+            continue;
+        }
         if total_points > MAX_POINTS_PER_FILL {
             any_failed = true;
             runlog::warn_line(&format!(
@@ -84,16 +134,189 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
             ));
             continue;
         }
+        if fill_start.elapsed().as_millis() as u64 > FILL_PATH_BUDGET_MS {
+            any_failed = true;
+            if !logged_timeout {
+                logged_timeout = true;
+                runlog::warn_line(&format!(
+                    "tess_guard timeout shape={} contours={} points={}",
+                    shape_id, contour_count, total_points
+                ));
+            }
+            continue;
+        }
 
         // 2) Group contours into outer-with-holes based on fill rule.
-        let groups = group_contours_more_correct(&contours, rule);
+        let groups = if contour_count <= 16 && total_points <= 800 {
+            match group_contours_more_correct(
+                &contours,
+                rule,
+                &fill_start,
+                FILL_PATH_BUDGET_MS,
+            ) {
+                GroupContoursResult::Groups(groups) => {
+                    group_used_more_correct = group_used_more_correct.saturating_add(1);
+                    groups
+                }
+                GroupContoursResult::CapTests => {
+                    if !logged_cap_tests {
+                        logged_cap_tests = true;
+                        runlog::warn_line(&format!(
+                            "tess_guard cap_tests shape={} contours={} points={} max_tests={}",
+                            shape_id, contour_count, total_points, MAX_TOTAL_CONTAINMENT_TESTS
+                        ));
+                    }
+                    runlog::warn_line(&format!(
+                        "tess_group fallback=fast shape={} contours={} points={}",
+                        shape_id, contour_count, total_points
+                    ));
+                    match group_contours_fast_parent_depth(
+                        &contours,
+                        rule,
+                        &fill_start,
+                        FILL_PATH_BUDGET_MS,
+                    ) {
+                        GroupContoursResult::Groups(groups) => {
+                            group_used_fast = group_used_fast.saturating_add(1);
+                            groups
+                        }
+                        GroupContoursResult::CapTests => {
+                            if !logged_cap_tests {
+                                logged_cap_tests = true;
+                                runlog::warn_line(&format!(
+                                    "tess_guard cap_tests shape={} contours={} points={} max_tests={}",
+                                    shape_id, contour_count, total_points, MAX_TOTAL_CONTAINMENT_TESTS
+                                ));
+                            }
+                            runlog::warn_line(&format!(
+                                "tess_group fallback=trivial shape={} contours={} points={}",
+                                shape_id, contour_count, total_points
+                            ));
+                            group_used_trivial = group_used_trivial.saturating_add(1);
+                            group_contours_trivial(&contours)
+                        }
+                        GroupContoursResult::Timeout => {
+                            if !logged_timeout {
+                                logged_timeout = true;
+                                runlog::warn_line(&format!(
+                                    "tess_guard timeout shape={} contours={} points={}",
+                                    shape_id, contour_count, total_points
+                                ));
+                            }
+                            runlog::warn_line(&format!(
+                                "tess_group fallback=trivial shape={} contours={} points={}",
+                                shape_id, contour_count, total_points
+                            ));
+                            group_used_trivial = group_used_trivial.saturating_add(1);
+                            group_contours_trivial(&contours)
+                        }
+                    }
+                }
+                GroupContoursResult::Timeout => {
+                    if !logged_timeout {
+                        logged_timeout = true;
+                        runlog::warn_line(&format!(
+                            "tess_guard timeout shape={} contours={} points={}",
+                            shape_id, contour_count, total_points
+                        ));
+                    }
+                    runlog::warn_line(&format!(
+                        "tess_group fallback=fast shape={} contours={} points={}",
+                        shape_id, contour_count, total_points
+                    ));
+                    match group_contours_fast_parent_depth(
+                        &contours,
+                        rule,
+                        &fill_start,
+                        FILL_PATH_BUDGET_MS,
+                    ) {
+                        GroupContoursResult::Groups(groups) => {
+                            group_used_fast = group_used_fast.saturating_add(1);
+                            groups
+                        }
+                        GroupContoursResult::CapTests => {
+                            if !logged_cap_tests {
+                                logged_cap_tests = true;
+                                runlog::warn_line(&format!(
+                                    "tess_guard cap_tests shape={} contours={} points={} max_tests={}",
+                                    shape_id, contour_count, total_points, MAX_TOTAL_CONTAINMENT_TESTS
+                                ));
+                            }
+                            runlog::warn_line(&format!(
+                                "tess_group fallback=trivial shape={} contours={} points={}",
+                                shape_id, contour_count, total_points
+                            ));
+                            group_used_trivial = group_used_trivial.saturating_add(1);
+                            group_contours_trivial(&contours)
+                        }
+                        GroupContoursResult::Timeout => {
+                            if !logged_timeout {
+                                logged_timeout = true;
+                                runlog::warn_line(&format!(
+                                    "tess_guard timeout shape={} contours={} points={}",
+                                    shape_id, contour_count, total_points
+                                ));
+                            }
+                            runlog::warn_line(&format!(
+                                "tess_group fallback=trivial shape={} contours={} points={}",
+                                shape_id, contour_count, total_points
+                            ));
+                            group_used_trivial = group_used_trivial.saturating_add(1);
+                            group_contours_trivial(&contours)
+                        }
+                    }
+                }
+            }
+        } else {
+            match group_contours_fast_parent_depth(&contours, rule, &fill_start, FILL_PATH_BUDGET_MS) {
+                GroupContoursResult::Groups(groups) => {
+                    group_used_fast = group_used_fast.saturating_add(1);
+                    groups
+                }
+                GroupContoursResult::CapTests => {
+                    if !logged_cap_tests {
+                        logged_cap_tests = true;
+                        runlog::warn_line(&format!(
+                            "tess_guard cap_tests shape={} contours={} points={} max_tests={}",
+                            shape_id, contour_count, total_points, MAX_TOTAL_CONTAINMENT_TESTS
+                        ));
+                    }
+                    runlog::warn_line(&format!(
+                        "tess_group fallback=trivial shape={} contours={} points={}",
+                        shape_id, contour_count, total_points
+                    ));
+                    group_used_trivial = group_used_trivial.saturating_add(1);
+                    group_contours_trivial(&contours)
+                }
+                GroupContoursResult::Timeout => {
+                    if !logged_timeout {
+                        logged_timeout = true;
+                        runlog::warn_line(&format!(
+                            "tess_guard timeout shape={} contours={} points={}",
+                            shape_id, contour_count, total_points
+                        ));
+                    }
+                    runlog::warn_line(&format!(
+                        "tess_group fallback=trivial shape={} contours={} points={}",
+                        shape_id, contour_count, total_points
+                    ));
+                    group_used_trivial = group_used_trivial.saturating_add(1);
+                    group_contours_trivial(&contours)
+                }
+            }
+        };
         if groups.is_empty() {
             any_failed = true;
             continue;
         }
 
         // 3) Triangulate each outer-with-holes group using earcut and merge into this fill mesh.
+        let mut timed_out = false;
         for mut group in groups {
+            if fill_start.elapsed().as_millis() as u64 > FILL_PATH_BUDGET_MS {
+                timed_out = true;
+                break;
+            }
             orient_group_winding(&mut group);
             let base = out_verts.len();
             if base >= MAX_VERTS_PER_MESH {
@@ -120,6 +343,10 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                     fill_paths
                 ));
                 return Err(TessError::TooManyVerts);
+            }
+            if fill_start.elapsed().as_millis() as u64 > FILL_PATH_BUDGET_MS {
+                timed_out = true;
+                break;
             }
 
             let idx = earcut(&coords, &hole_starts, 2).map_err(|_| {
@@ -155,12 +382,24 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
             }
         }
 
+        if timed_out {
+            any_failed = true;
+            if !logged_timeout {
+                logged_timeout = true;
+                runlog::warn_line(&format!(
+                    "tess_guard timeout shape={} contours={} points={}",
+                    shape_id, contour_count, total_points
+                ));
+            }
+            continue;
+        }
+
         if out_indices.is_empty() {
             any_failed = true;
             continue;
         }
 
-        fills.push(FillMesh { verts: out_verts, indices: out_indices });
+        fills.push(FillMesh { verts: out_verts, indices: out_indices, paint });
     }
 
     if fills.is_empty() {
@@ -177,7 +416,14 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
         }
         return Err(TessError::NoContours);
     }
-    Ok(TessOutput { fills, any_failed })
+    Ok(TessOutput {
+        fills,
+        any_failed,
+        group_used_more_correct,
+        group_used_fast,
+        group_used_trivial,
+        unsupported_fill_paints,
+    })
 }
 
 pub fn tessellate_strokes(shape: &DistilledShape<'_>, shape_id: u32) -> Result<StrokeOutput, TessError> {
@@ -621,7 +867,7 @@ fn build_stroke_mesh(points: &[(f32, f32)], half_w: f32, miter_limit: f32, close
         indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
     }
 
-    Some(FillMesh { verts, indices })
+    Some(FillMesh { verts, indices, paint: FillPaint::Unsupported })
 }
 
 fn normalize_vec(v: (f32, f32)) -> (f32, f32) {
@@ -728,7 +974,20 @@ struct ContourGroup {
     holes: Vec<Vec<(f32, f32)>>,
 }
 
-fn group_contours_more_correct(contours: &[Vec<(f32, f32)>], rule: FillRule) -> Vec<ContourGroup> {
+enum GroupContoursResult {
+    Groups(Vec<ContourGroup>),
+    CapTests,
+    Timeout,
+}
+
+// More-correct grouping: uses fill-rule evaluation to classify outers/holes.
+// This is accurate but can be expensive on complex contour sets.
+fn group_contours_more_correct(
+    contours: &[Vec<(f32, f32)>],
+    rule: FillRule,
+    start: &Instant,
+    budget_ms: u64,
+) -> GroupContoursResult {
     // Compute bbox for each contour.
     let mut bbox: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(contours.len());
     for c in contours {
@@ -737,13 +996,21 @@ fn group_contours_more_correct(contours: &[Vec<(f32, f32)>], rule: FillRule) -> 
 
     // Build parent relation: smallest contour that contains this one.
     let mut parent: Vec<Option<usize>> = vec![None; contours.len()];
+    let mut tests_used: usize = 0;
     for i in 0..contours.len() {
+        if start.elapsed().as_millis() as u64 > budget_ms {
+            return GroupContoursResult::Timeout;
+        }
         // Use a point guaranteed to be inside the contour for containment tests.
         let p = sample_point_inside_contour(&contours[i]);
         let mut best: Option<usize> = None;
         let mut best_area = f32::INFINITY;
         for j in 0..contours.len() {
             if i == j { continue; }
+            tests_used = tests_used.saturating_add(1);
+            if tests_used > MAX_TOTAL_CONTAINMENT_TESTS {
+                return GroupContoursResult::CapTests;
+            }
             if !bbox_contains(bbox[j], p) { continue; }
             if !point_in_poly(p, &contours[j]) { continue; }
             let a = polygon_area_abs(&contours[j]);
@@ -762,6 +1029,9 @@ fn group_contours_more_correct(contours: &[Vec<(f32, f32)>], rule: FillRule) -> 
     // nested holes (hole-in-hole) for both EvenOdd and NonZero rules.
     let mut is_outer: Vec<bool> = vec![false; contours.len()];
     for i in 0..contours.len() {
+        if start.elapsed().as_millis() as u64 > budget_ms {
+            return GroupContoursResult::Timeout;
+        }
         let p = sample_point_inside_contour(&contours[i]);
         is_outer[i] = filled_at_point(p, contours, rule);
     }
@@ -777,6 +1047,9 @@ fn group_contours_more_correct(contours: &[Vec<(f32, f32)>], rule: FillRule) -> 
 
     // Assign hole contours to the nearest outer ancestor.
     for i in 0..contours.len() {
+        if start.elapsed().as_millis() as u64 > budget_ms {
+            return GroupContoursResult::Timeout;
+        }
         if is_outer[i] {
             continue;
         }
@@ -790,7 +1063,109 @@ fn group_contours_more_correct(contours: &[Vec<(f32, f32)>], rule: FillRule) -> 
         }
     }
 
-    groups
+    GroupContoursResult::Groups(groups)
+}
+
+// Fast grouping: uses parent-depth parity (EvenOdd heuristic) to classify outers/holes.
+// For NonZero we intentionally keep the same parity heuristic as a fast approximation.
+// If caps/timeouts hit, callers should fall back to trivial grouping.
+fn group_contours_fast_parent_depth(
+    contours: &[Vec<(f32, f32)>],
+    _rule: FillRule,
+    start: &Instant,
+    budget_ms: u64,
+) -> GroupContoursResult {
+    // Compute bbox for each contour.
+    let mut bbox: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(contours.len());
+    for c in contours {
+        bbox.push(poly_bbox(c));
+    }
+
+    let mut parent: Vec<Option<usize>> = vec![None; contours.len()];
+    let mut tests_used: usize = 0;
+    for i in 0..contours.len() {
+        if start.elapsed().as_millis() as u64 > budget_ms {
+            return GroupContoursResult::Timeout;
+        }
+        let p = sample_point_inside_contour(&contours[i]);
+        let mut best: Option<usize> = None;
+        let mut best_area = f32::INFINITY;
+        for j in 0..contours.len() {
+            if i == j { continue; }
+            tests_used = tests_used.saturating_add(1);
+            if tests_used > MAX_TOTAL_CONTAINMENT_TESTS {
+                return GroupContoursResult::CapTests;
+            }
+            if !bbox_contains(bbox[j], p) { continue; }
+            if !point_in_poly(p, &contours[j]) { continue; }
+            let a = polygon_area_abs(&contours[j]);
+            if a < best_area {
+                best_area = a;
+                best = Some(j);
+            }
+        }
+        parent[i] = best;
+    }
+
+    let mut depth: Vec<usize> = vec![0; contours.len()];
+    for i in 0..contours.len() {
+        let mut d = 0usize;
+        let mut cur = parent[i];
+        while let Some(p) = cur {
+            d = d.saturating_add(1);
+            cur = parent[p];
+        }
+        depth[i] = d;
+    }
+
+    let mut groups: Vec<ContourGroup> = Vec::new();
+    let mut outer_map: Vec<Option<usize>> = vec![None; contours.len()];
+    for i in 0..contours.len() {
+        let is_outer = depth[i] % 2 == 0;
+        if is_outer {
+            outer_map[i] = Some(groups.len());
+            groups.push(ContourGroup { outer: contours[i].clone(), holes: Vec::new() });
+        }
+    }
+
+    for i in 0..contours.len() {
+        if depth[i] % 2 == 0 {
+            continue;
+        }
+        let mut cur = parent[i];
+        while let Some(p) = cur {
+            if let Some(g) = outer_map[p] {
+                groups[g].holes.push(contours[i].clone());
+                break;
+            }
+            cur = parent[p];
+        }
+    }
+
+    GroupContoursResult::Groups(groups)
+}
+
+// Trivial grouping: pick the largest area contour as outer and treat the rest as holes.
+fn group_contours_trivial(contours: &[Vec<(f32, f32)>]) -> Vec<ContourGroup> {
+    if contours.is_empty() {
+        return Vec::new();
+    }
+    let mut best_idx = 0usize;
+    let mut best_area = 0.0f32;
+    for (i, c) in contours.iter().enumerate() {
+        let area = polygon_area_abs(c);
+        if area > best_area {
+            best_area = area;
+            best_idx = i;
+        }
+    }
+    let mut holes = Vec::new();
+    for (i, c) in contours.iter().enumerate() {
+        if i != best_idx {
+            holes.push(c.clone());
+        }
+    }
+    vec![ContourGroup { outer: contours[best_idx].clone(), holes }]
 }
 
 fn orient_group_winding(group: &mut ContourGroup) {

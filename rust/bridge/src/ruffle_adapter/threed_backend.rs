@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "navigator")]
 use async_channel::{Receiver, Sender};
@@ -44,6 +44,8 @@ use crate::runlog;
 type ShapeKey = usize;
 
 const MAX_TRIS_PER_FRAME: u32 = 8000;
+const MAX_UNSUPPORTED_FILL_WARNINGS: u32 = 8;
+static UNSUPPORTED_FILL_DRAW_WARNINGS: AtomicU32 = AtomicU32::new(0);
 
 fn to_color_transform(ct: SwfColorTransform) -> Option<ColorTransform> {
     if ct == SwfColorTransform::IDENTITY {
@@ -163,6 +165,13 @@ struct Diagnostics {
     last_cmds_bitmaps: u32,
     last_cmds_other: u32,
     last_tris: u32,
+    total_tess_ms_fills: u64,
+    total_tess_ms_strokes: u64,
+    max_tess_ms_single_shape: u64,
+    total_group_more_correct: u32,
+    total_group_fast: u32,
+    total_group_trivial: u32,
+    total_unsupported_fill_paints: u32,
     last_warning: Option<String>,
     last_fatal: Option<String>,
 }
@@ -334,6 +343,13 @@ impl ThreeDSBackend {
             last_cmds_bitmaps: u32,
             last_cmds_other: u32,
             last_tris: u32,
+            total_tess_ms_fills: u64,
+            total_tess_ms_strokes: u64,
+            max_tess_ms_single_shape: u64,
+            total_group_more_correct: u32,
+            total_group_fast: u32,
+            total_group_trivial: u32,
+            total_unsupported_fill_paints: u32,
             last_warning: Option<String>,
             last_fatal: Option<String>,
         }
@@ -351,6 +367,13 @@ impl ThreeDSBackend {
                 last_cmds_bitmaps: s.diagnostics.last_cmds_bitmaps,
                 last_cmds_other: s.diagnostics.last_cmds_other,
                 last_tris: s.diagnostics.last_tris,
+                total_tess_ms_fills: s.diagnostics.total_tess_ms_fills,
+                total_tess_ms_strokes: s.diagnostics.total_tess_ms_strokes,
+                max_tess_ms_single_shape: s.diagnostics.max_tess_ms_single_shape,
+                total_group_more_correct: s.diagnostics.total_group_more_correct,
+                total_group_fast: s.diagnostics.total_group_fast,
+                total_group_trivial: s.diagnostics.total_group_trivial,
+                total_unsupported_fill_paints: s.diagnostics.total_unsupported_fill_paints,
                 last_warning: s.diagnostics.last_warning.clone(),
                 last_fatal: s.diagnostics.last_fatal.clone(),
             }
@@ -378,6 +401,19 @@ impl ThreeDSBackend {
             diag.last_cmds_bitmaps,
             diag.last_cmds_other,
             diag.last_tris
+        ));
+        out.push_str(&format!(
+            "shape_tess_timing totals_fills_ms={} totals_strokes_ms={} max_shape_ms={}\n",
+            diag.total_tess_ms_fills,
+            diag.total_tess_ms_strokes,
+            diag.max_tess_ms_single_shape
+        ));
+        out.push_str(&format!(
+            "shape_grouping totals more_correct={} fast={} trivial={} unsupported_fills={}\n",
+            diag.total_group_more_correct,
+            diag.total_group_fast,
+            diag.total_group_trivial,
+            diag.total_unsupported_fill_paints
         ));
         out.push_str(&format!(
             "shape_cache fill missing={} invalid={} bounds_fallbacks={} stroke missing={} invalid={} bounds_fallbacks={}\n",
@@ -447,6 +483,8 @@ impl RenderBackend for ThreeDSBackend {
     fn set_viewport_dimensions(&mut self, _dimensions: ViewportDimensions) {}
 
     fn register_shape(&mut self, shape: DistilledShape<'_>, _bitmap: &dyn BitmapSource) -> ShapeHandle {
+        // Timing logs capture tessellation hotspots per shape so we can correlate slow meshes
+        // with shape IDs/bounds without altering the render path.
         let id = self.next_shape_id.fetch_add(1, Ordering::Relaxed);
         let handle_impl = Arc::new(ThreeDSShapeHandleImpl { id });
         let key: ShapeKey = Arc::as_ptr(&handle_impl) as *const () as ShapeKey;
@@ -469,16 +507,33 @@ impl RenderBackend for ThreeDSBackend {
             runlog::log_line(&format!("register_shape begin id={} b={} {} {} {}", id, bounds.x, bounds.y, bounds.w, bounds.h));
         }
 
-        let (fills, fill_failed, fill_partial) = match tessellate::tessellate_fills(&shape, id) {
-            Ok(res) => (res.fills, false, res.any_failed),
-            Err(tessellate::TessError::NoContours) => (Vec::new(), false, false),
-            Err(_) => (Vec::new(), true, false),
-        };
+        let fills_start = Instant::now();
+        let (fills, fill_failed, fill_partial, group_used_more_correct, group_used_fast, group_used_trivial, unsupported_fill_paints) =
+            match tessellate::tessellate_fills(&shape, id) {
+                Ok(res) => (
+                    res.fills,
+                    false,
+                    res.any_failed,
+                    res.group_used_more_correct,
+                    res.group_used_fast,
+                    res.group_used_trivial,
+                    res.unsupported_fill_paints,
+                ),
+                Err(tessellate::TessError::NoContours) => (Vec::new(), false, false, 0, 0, 0, 0),
+                Err(tessellate::TessError::Timeout) => {
+                    runlog::stage(&format!("register_shape id={} tess_timeout", id), 0);
+                    (Vec::new(), true, false, 0, 0, 0, 0)
+                }
+                Err(_) => (Vec::new(), true, false, 0, 0, 0, 0),
+            };
+        let fills_ms = fills_start.elapsed().as_millis() as u64;
+        let strokes_start = Instant::now();
         let (strokes, stroke_failed, stroke_partial) = match tessellate::tessellate_strokes(&shape, id) {
             Ok(res) => (res.strokes, false, res.any_failed),
             Err(tessellate::TessError::NoContours) => (Vec::new(), false, false),
             Err(_) => (Vec::new(), true, false),
         };
+        let strokes_ms = strokes_start.elapsed().as_millis() as u64;
 
         let text_shape = is_text_shape(&shape);
 
@@ -509,7 +564,7 @@ impl RenderBackend for ThreeDSBackend {
 
         if runlog::is_verbose() {
             runlog::log_line(&format!(
-                "shape_summary id={} b={} {} {} {} fills={} fill_tris={} strokes={} stroke_tris={} tess_failed={} tess_partial={} stroke_failed={} stroke_partial={} text={}",
+                "shape_summary id={} b={} {} {} {} fills={} fill_tris={} strokes={} stroke_tris={} tess_failed={} tess_partial={} stroke_failed={} stroke_partial={} text={} group_more_correct={} group_fast={} group_trivial={} unsupported_fills={}",
                 id,
                 bounds.x,
                 bounds.y,
@@ -523,7 +578,25 @@ impl RenderBackend for ThreeDSBackend {
                 fill_partial,
                 stroke_failed,
                 stroke_partial,
-                text_shape
+                text_shape,
+                group_used_more_correct,
+                group_used_fast,
+                group_used_trivial,
+                unsupported_fill_paints
+            ));
+            runlog::log_line(&format!(
+                "shape_register_timing summary id={} b={} {} {} {} fills_ms={} strokes_ms={} fills={} fill_tris={} strokes={} stroke_tris={}",
+                id,
+                bounds.x,
+                bounds.y,
+                bounds.w,
+                bounds.h,
+                fills_ms,
+                strokes_ms,
+                fill_count.unwrap_or(0),
+                fill_tris.unwrap_or(0),
+                stroke_count.unwrap_or(0),
+                stroke_tris.unwrap_or(0)
             ));
         }
 
@@ -548,6 +621,17 @@ impl RenderBackend for ThreeDSBackend {
 
         let mut s = self.shared.lock().unwrap();
         s.diagnostics.shapes_registered = s.diagnostics.shapes_registered.saturating_add(1);
+        s.diagnostics.total_tess_ms_fills = s.diagnostics.total_tess_ms_fills.saturating_add(fills_ms);
+        s.diagnostics.total_tess_ms_strokes = s.diagnostics.total_tess_ms_strokes.saturating_add(strokes_ms);
+        let shape_total_ms = fills_ms.saturating_add(strokes_ms);
+        s.diagnostics.max_tess_ms_single_shape = s.diagnostics.max_tess_ms_single_shape.max(shape_total_ms);
+        s.diagnostics.total_group_more_correct = s.diagnostics.total_group_more_correct.saturating_add(group_used_more_correct);
+        s.diagnostics.total_group_fast = s.diagnostics.total_group_fast.saturating_add(group_used_fast);
+        s.diagnostics.total_group_trivial = s.diagnostics.total_group_trivial.saturating_add(group_used_trivial);
+        s.diagnostics.total_unsupported_fill_paints = s
+            .diagnostics
+            .total_unsupported_fill_paints
+            .saturating_add(unsupported_fill_paints);
         ShapeHandle(handle_impl)
     }
 
@@ -654,6 +738,7 @@ impl RenderBackend for ThreeDSBackend {
                         tx: transform.matrix.tx.to_pixels() as f32,
                         ty: transform.matrix.ty.to_pixels() as f32,
                     };
+                    let color_transform = to_color_transform(transform.color_transform);
 
                     if let Some(b) = shapes_cache.get_bounds(key) {
                         // Per-shape early reject using transformed bounds.
@@ -684,6 +769,8 @@ impl RenderBackend for ThreeDSBackend {
                                         shape_key: key,
                                         fill_idx: 0,
                                         transform: matrix,
+                                        solid_rgba: None,
+                                        color_transform,
                                         color_key: key as u64,
                                         wireframe: wire_once,
                                     });
@@ -699,11 +786,29 @@ impl RenderBackend for ThreeDSBackend {
                             // Emit one draw cmd per fill mesh.
                             for fi in 0..fill_count {
                                 let color_key = (key as u64) ^ ((fi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                                let solid_rgba = shapes_cache
+                                    .get_fill_mesh(key, fi)
+                                    .map(|mesh| match mesh.paint {
+                                        crate::render::cache::shapes::FillPaint::SolidRGBA(r, g, b, a) => Some([r, g, b, a]),
+                                        crate::render::cache::shapes::FillPaint::Unsupported => None,
+                                    })
+                                    .unwrap_or(None);
+                                if solid_rgba.is_none() {
+                                    let warn_count = UNSUPPORTED_FILL_DRAW_WARNINGS.fetch_add(1, Ordering::Relaxed);
+                                    if warn_count < MAX_UNSUPPORTED_FILL_WARNINGS {
+                                        runlog::warn_line(&format!(
+                                            "shape_fill_unsupported shape={} fill={}",
+                                            key, fi
+                                        ));
+                                    }
+                                }
                                 if is_text {
                                     s.frame.cmds.push(RenderCmd::DrawTextSolidFill {
                                         shape_key: key,
                                         fill_idx: fi as u16,
                                         transform: matrix,
+                                        solid_rgba,
+                                        color_transform,
                                         color_key,
                                         wireframe: wire_once,
                                     });
@@ -712,6 +817,8 @@ impl RenderBackend for ThreeDSBackend {
                                         shape_key: key,
                                         fill_idx: fi as u16,
                                         transform: matrix,
+                                        solid_rgba,
+                                        color_transform,
                                         color_key,
                                         wireframe: wire_once,
                                     });

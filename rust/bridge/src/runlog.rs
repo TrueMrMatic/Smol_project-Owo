@@ -4,8 +4,9 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use core::fmt::Write as FmtWrite;
 
-const BUILD_ID: &str = "PATCH_009_MASKS";
+const BUILD_ID: &str = "PATCH_010_STEP3_SOLID_COLOR";
 const BASE_ID: &str = "PATCH_008_TEXT_VECTOR";
 
 /// Flush policy:
@@ -228,24 +229,26 @@ fn log_impl(level: Level, msg: &str, important: bool) {
             };
             rl.seq = rl.seq.wrapping_add(1);
             let tag = match level { Level::Info => "INFO", Level::Warn => "WARN", Level::Error => "ERR " };
-            let line = format!("[{:06}] {} {}\n", rl.seq, tag, msg);
 
             // Always store in boottrace if verbosity > 0
             if rl.verbosity > 0 {
-                rl.bt_buf.push_str(&line);
+                let _ = writeln!(&mut rl.bt_buf, "[{:06}] {} {}", rl.seq, tag, msg);
             }
 
             // Warnings/errors also go to warnings.txt
             if level != Level::Info {
-                let _ = rl.warnings.write_all(line.as_bytes());
+                let _ = writeln!(rl.warnings, "[{:06}] {} {}", rl.seq, tag, msg);
                 let _ = rl.warnings.flush();
-                push_recent_warning(rl, line.trim_end());
+                let mut warning_line = String::new();
+                let _ = write!(&mut warning_line, "[{:06}] {} {}", rl.seq, tag, msg);
+                push_recent_warning(rl, warning_line.trim_end());
             }
 
             // Console output: keep lightweight by default
             if rl.verbosity >= 2 || (rl.verbosity == 1 && (important || level != Level::Info)) {
                 // Trim for console
-                let mut s = line.trim_end().to_string();
+                let mut s = String::with_capacity(60);
+                let _ = write!(&mut s, "[{:06}] {} {}", rl.seq, tag, msg);
                 if s.len() > 60 { s.truncate(60); }
                 push_console(rl, &s);
             }
@@ -268,8 +271,14 @@ pub fn stage(stage: &str, frame: u64) {
             let Some(rl) = guard.as_mut() else {
                 return;
             };
-            rl.last_stage = stage.to_string();
-            rl.last_stage_frame = frame;
+            // Avoid per-frame allocations: stage() is called every frame, so reuse buffer storage.
+            if rl.last_stage == stage {
+                rl.last_stage_frame = frame;
+            } else {
+                rl.last_stage.clear();
+                rl.last_stage.push_str(stage);
+                rl.last_stage_frame = frame;
+            }
             // Only force stage flush if we're entering a potentially-heavy phase.
             let force = stage.contains("tess") || stage.contains("earcut");
             rl.stage_pending = true;

@@ -292,3 +292,50 @@ Theme: Rect mask scissoring (gated)
 
 ## Risks / Watch-outs
 - Only axis-aligned rect masks are supported; rotated/shape masks are ignored.
+
+# Update Notes — PATCH_010_SHAPE_TESS_TIMINGS
+
+Build ID: PATCH_010_SHAPE_TESS_TIMINGS  
+Base: PATCH_009_MASKS  
+Theme: Shape registration timing diagnostics
+
+## Summary
+- Added verbose `shape_register_timing` logs that include per-shape fill/stroke tessellation times plus mesh/triangle counts.
+- Exposed rolling tessellation timing totals and the max single-shape time in the status snapshot for quick HUD diagnostics.
+
+## How to read the timing logs
+- Each shape emits a single line like:
+  - `shape_register_timing summary id=44 b=... fills_ms=12 strokes_ms=3 fills=2 fill_tris=120 strokes=1 stroke_tris=40`
+- Use `fills_ms`/`strokes_ms` to spot slow tessellation and correlate with the shape `id` and bounds.
+
+# Update Notes — PATCH_011_RUNLOG_STAGE_ALLOC_FIX
+
+Build ID: PATCH_010_SHAPE_TESS_TIMINGS  
+Base: PATCH_010_SHAPE_TESS_TIMINGS  
+Theme: Per-frame logging allocation reduction
+
+## Summary
+- Removed per-frame heap allocations in `runlog::stage()` by reusing the existing stage string buffer.
+- Keeps all existing logs and forced flush behavior intact while reducing frame-time churn.
+- runlog: removed per-log allocation by writing directly into the boottrace buffer.
+- Added tessellation guardrails (timeouts + caps) to avoid hangs during shape registration; warnings include shape id, contour count, and point totals.
+- Added hybrid contour grouping (accurate for small shapes, fast for large ones, trivial fallback on caps) to keep correctness for simple cases while avoiding hangs on complex shapes.
+- Added grouping counters in shape summaries and status snapshots to validate which path (more_correct/fast/trivial) a shape used.
+- Step 3A now supports solid fill colors end-to-end (gradients/bitmaps still unsupported).
+- Solid fill draw commands now carry per-fill RGBA plus optional color transforms; debug color keys remain as fallback for unsupported fills.
+- Solid fill colors are now used in the renderer; alpha blending is not yet supported (fills render opaque).
+
+## Step 1-3 summary
+- Step 1: boot + runlog scaffolding to capture per-run telemetry and snapshots.
+- Step 2A: tessellate fill meshes at shape registration time with guardrails; cache per-fill meshes and grouping stats.
+- Step 2B: tessellate stroke meshes and cache per-stroke meshes for draw-time reuse.
+- Step 3A: render cached meshes with solid fill colors and color transforms; unsupported fills fall back to debug colors.
+
+## Why it matters on 3DS
+- `stage()` runs every frame; avoiding allocations helps reduce allocator pressure and SD write stalls during heavy scenes.
+- Guardrails prevent getting stuck at `register_shape ... pre_tess`; check `run_logs/last_stage.txt` for `tess_timeout` and `warnings.txt` for `tess_guard` entries.
+- Hybrid grouping logs `tess_group fallback=fast|trivial` when the fast path is used to keep complex shapes from stalling.
+- Validate grouping path selection via `shape_summary` lines (per-shape counts) and the `shape_grouping totals ...` line in status snapshots.
+
+## Notes
+- BUILD_ID remains unchanged in `runlog.rs` for now; it will be bumped in the next step.
