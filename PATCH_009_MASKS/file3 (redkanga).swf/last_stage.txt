@@ -1,1 +1,0 @@
-frame=0 stage=register_shape id=23 pre_tess

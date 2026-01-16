@@ -1,5 +1,0 @@
-build_id=PATCH_009_MASKS
-base_id=PATCH_008_TEXT_VECTOR
-start_ms=1768502475068
-swf_path=sdmc:/flash/file2 (bloonstd).swf
-run_dir=sdmc:/flash/_runs/PATCH_009_MASKS/file2 (bloonstd).swf
