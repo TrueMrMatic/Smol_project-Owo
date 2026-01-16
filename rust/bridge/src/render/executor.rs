@@ -1,7 +1,7 @@
 use crate::render::device::RenderDevice;
 #[cfg(debug_assertions)]
 use crate::render::device::fb3ds;
-use crate::render::frame::{FramePacket, Matrix2D, RectI, RenderCmd, TexVertex};
+use crate::render::frame::{ColorTransform, FramePacket, Matrix2D, RectI, RenderCmd, TexVertex};
 use crate::render::SharedCaches;
 use crate::render::cache::shapes::Vertex2;
 use crate::runlog;
@@ -34,7 +34,18 @@ static STROKE_FALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_MESH_TRIS: AtomicU32 = AtomicU32::new(0);
 static LAST_RECT_FASTPATH: AtomicU32 = AtomicU32::new(0);
 static LAST_BOUNDS_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+static FILL_ALPHA_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 const DRAW_SUMMARY_FRAMES: u32 = 1800;
+
+fn apply_color_transform_rgba(mut rgba: [u8; 4], ct: Option<ColorTransform>) -> [u8; 4] {
+    if let Some(ct) = ct {
+        for i in 0..4 {
+            let v = rgba[i] as f32 * ct.mul[i] + ct.add[i];
+            rgba[i] = v.clamp(0.0, 255.0) as u8;
+        }
+    }
+    rgba
+}
 
 fn rect_intersects_surface(rect: RectI, sw: i32, sh: i32) -> bool {
     if rect.w <= 0 || rect.h <= 0 {
@@ -137,9 +148,18 @@ impl CommandExecutor {
                         device.stroke_rect(*rect, 255, 255, 255);
                     }
                 }
-                RenderCmd::DrawShapeSolidFill { shape_key, fill_idx, transform, color_key, wireframe } => {
+                RenderCmd::DrawShapeSolidFill { shape_key, fill_idx, transform, solid_rgba, color_transform, color_key, wireframe } => {
                     FILL_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
-                    let (cr, cg, cb) = color_from_key(*color_key);
+                    let solid_rgba = solid_rgba.map(|rgba| apply_color_transform_rgba(rgba, *color_transform));
+                    let (fallback_r, fallback_g, fallback_b) = if let Some([r, g, b, a]) = solid_rgba {
+                        if a != 255 && FILL_ALPHA_WARN_COUNT.fetch_add(1, Ordering::Relaxed) < 4 {
+                            // Alpha blending for vector fills is future work; current Step 3 is opaque.
+                            runlog::warn_line("fill_alpha ignored; vector fills are opaque in Step 3");
+                        }
+                        (r, g, b)
+                    } else {
+                        color_from_key(*color_key)
+                    };
                     // Early reject by transformed bounds (very common win for offscreen sprites).
                     if let Some(b) = shapes.get_bounds(*shape_key) {
                         let tr = rect_aabb_transformed(b, *transform);
@@ -153,6 +173,7 @@ impl CommandExecutor {
                     let mut missing_mesh = false;
                     let mut invalid_mesh = false;
                     if let Some(mesh) = shapes.get_fill_mesh(*shape_key, *fill_idx as usize) {
+                        let (cr, cg, cb) = (fallback_r, fallback_g, fallback_b);
                         let indices_ok = !mesh.indices.is_empty() && mesh.indices.len() % 3 == 0;
                         let verts_ok = !mesh.verts.is_empty();
                         if indices_ok && verts_ok {
@@ -238,16 +259,25 @@ impl CommandExecutor {
                             bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             // Safe fallback: bounds rect.
                             let rect = rect_aabb_transformed(b, *transform);
-                            device.fill_rect(rect, cr, cg, cb);
+                            device.fill_rect(rect, fallback_r, fallback_g, fallback_b);
                             if *wireframe {
                                 device.stroke_rect(rect, 255, 255, 255);
                             }
                         }
                     }
                 }
-                RenderCmd::DrawTextSolidFill { shape_key, fill_idx, transform, color_key, wireframe } => {
+                RenderCmd::DrawTextSolidFill { shape_key, fill_idx, transform, solid_rgba, color_transform, color_key, wireframe } => {
                     TEXT_DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
-                    let (cr, cg, cb) = color_from_key(*color_key);
+                    let solid_rgba = solid_rgba.map(|rgba| apply_color_transform_rgba(rgba, *color_transform));
+                    let (fallback_r, fallback_g, fallback_b) = if let Some([r, g, b, a]) = solid_rgba {
+                        if a != 255 && FILL_ALPHA_WARN_COUNT.fetch_add(1, Ordering::Relaxed) < 4 {
+                            // Alpha blending for vector fills is future work; current Step 3 is opaque.
+                            runlog::warn_line("fill_alpha ignored; vector fills are opaque in Step 3");
+                        }
+                        (r, g, b)
+                    } else {
+                        color_from_key(*color_key)
+                    };
                     // Early reject by transformed bounds (very common win for offscreen text).
                     if let Some(b) = shapes.get_bounds(*shape_key) {
                         let tr = rect_aabb_transformed(b, *transform);
@@ -260,6 +290,7 @@ impl CommandExecutor {
                     let mut missing_mesh = false;
                     let mut invalid_mesh = false;
                     if let Some(mesh) = shapes.get_fill_mesh(*shape_key, *fill_idx as usize) {
+                        let (cr, cg, cb) = (fallback_r, fallback_g, fallback_b);
                         let indices_ok = !mesh.indices.is_empty() && mesh.indices.len() % 3 == 0;
                         let verts_ok = !mesh.verts.is_empty();
                         if indices_ok && verts_ok {
@@ -299,7 +330,7 @@ impl CommandExecutor {
                         if let Some(b) = shapes.get_bounds(*shape_key) {
                             bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             let rect = rect_aabb_transformed(b, *transform);
-                            device.fill_rect(rect, cr, cg, cb);
+                            device.fill_rect(rect, fallback_r, fallback_g, fallback_b);
                             if *wireframe {
                                 device.stroke_rect(rect, 255, 255, 255);
                             }

@@ -11,6 +11,12 @@ pub struct Vertex2 {
     pub y: i32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum FillPaint {
+    SolidRGBA(u8, u8, u8, u8),
+    Unsupported,
+}
+
 /// One fill mesh for a shape.
 ///
 /// Design rule: renderer-owned data only (no Ruffle types).
@@ -18,6 +24,7 @@ pub struct Vertex2 {
 pub struct FillMesh {
     pub verts: Vec<Vertex2>,
     pub indices: Vec<u16>,
+    pub paint: FillPaint,
 }
 
 #[derive(Clone, Debug)]
@@ -130,7 +137,7 @@ impl ShapeCache {
             Vertex2 { x: x0, y: y1 },
         ];
         let indices: Vec<u16> = vec![0, 1, 2, 0, 2, 3];
-        let fill = FillMesh { verts, indices };
+        let fill = FillMesh { verts, indices, paint: FillPaint::Unsupported };
         self.by_key.insert(
             key,
             ShapeEntry {

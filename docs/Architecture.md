@@ -25,6 +25,7 @@ SWF → Ruffle core (Rust)
 - Adapts Ruffle output into a compact `CommandList`
 - Enforces caps + fallbacks for heavy operations
 - Emits run logs + stage markers for debugging
+- Step 3A supports solid fill colors (gradients/bitmaps still unsupported)
 
 ## Debugging artifacts
 Every run writes a **run bundle** with stage markers and status snapshots under:
