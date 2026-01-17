@@ -3,13 +3,75 @@ use crate::render::device::RenderDevice;
 use crate::render::device::fb3ds;
 use crate::render::frame::{ColorTransform, FramePacket, Matrix2D, RectI, RenderCmd, TexVertex};
 use crate::render::SharedCaches;
+use crate::render::cache::bitmaps::BitmapCache;
 use crate::render::cache::shapes::Vertex2;
 use crate::runlog;
 use crate::util::config;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-pub struct CommandExecutor;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlendMode {
+    Opaque,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ColorTransformKey {
+    mul: [u32; 4],
+    add: [u32; 4],
+}
+
+impl ColorTransformKey {
+    fn from_transform(ct: Option<ColorTransform>) -> Option<Self> {
+        ct.map(|ct| Self {
+            mul: ct.mul.map(f32::to_bits),
+            add: ct.add.map(f32::to_bits),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MeshState {
+    texture: Option<usize>,
+    blend: BlendMode,
+    color: Option<[u8; 3]>,
+    color_transform: Option<ColorTransformKey>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MeshKind {
+    Solid,
+    Wireframe,
+    Textured,
+}
+
+#[derive(Clone, Debug)]
+enum MeshData {
+    Solid { verts: Vec<Vertex2>, indices: Vec<u16> },
+    Textured { verts: Vec<TexVertex>, indices: Vec<u16>, color_transform: Option<ColorTransform> },
+}
+
+#[derive(Clone, Debug)]
+struct QueuedMesh {
+    kind: MeshKind,
+    state: MeshState,
+    data: MeshData,
+}
+
+#[derive(Default)]
+struct FrameQueue {
+    entries: Vec<QueuedMesh>,
+}
+
+impl FrameQueue {
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+pub struct CommandExecutor {
+    frame_queue: FrameQueue,
+}
 
 const DEBUG_AFFINE_VERTS: [Vertex2; 4] = [
     Vertex2 { x: 0, y: 0 },
@@ -93,6 +155,22 @@ fn is_integer_translation(transform: Matrix2D) -> Option<(i32, i32)> {
     None
 }
 
+fn transform_mesh_vertices(verts: &[Vertex2], transform: Matrix2D) -> Vec<Vertex2> {
+    if let Some((tx, ty)) = is_integer_translation(transform) {
+        return verts
+            .iter()
+            .map(|v| Vertex2 { x: v.x + tx, y: v.y + ty })
+            .collect();
+    }
+    verts
+        .iter()
+        .map(|v| {
+            let (x, y) = transform.apply(v.x as f32, v.y as f32);
+            Vertex2 { x: x.round() as i32, y: y.round() as i32 }
+        })
+        .collect()
+}
+
 fn mesh_is_axis_aligned_rect(mesh_verts: &[crate::render::cache::shapes::Vertex2], indices: &[u16]) -> Option<RectI> {
     // Fast-path: the common 2-triangle rectangle mesh.
     if mesh_verts.len() != 4 || indices.len() != 6 {
@@ -124,7 +202,84 @@ fn mesh_is_axis_aligned_rect(mesh_verts: &[crate::render::cache::shapes::Vertex2
 }
 
 impl CommandExecutor {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self { frame_queue: FrameQueue::default() }
+    }
+
+    fn draw_mesh(&mut self, mesh: QueuedMesh) {
+        self.frame_queue.entries.push(mesh);
+    }
+
+    fn flush_if_pending<D: RenderDevice>(&mut self, device: &mut D, bitmaps: &BitmapCache) {
+        if self.frame_queue.entries.is_empty() {
+            return;
+        }
+        self.flush_frame(device, bitmaps);
+    }
+
+    fn flush_frame<D: RenderDevice>(&mut self, device: &mut D, bitmaps: &BitmapCache) {
+        let mut current: Option<QueuedMesh> = None;
+        for entry in self.frame_queue.entries.drain(..) {
+            if let Some(batch) = current.as_mut() {
+                if batch.kind == entry.kind && batch.state == entry.state {
+                    match (&mut batch.data, entry.data) {
+                        (MeshData::Solid { verts, indices }, MeshData::Solid { verts: next_verts, indices: next_indices }) => {
+                            if verts.len() + next_verts.len() > u16::MAX as usize {
+                                Self::submit_batch(device, bitmaps, batch);
+                                *batch = entry;
+                                continue;
+                            }
+                            let offset = verts.len() as u16;
+                            verts.extend(next_verts);
+                            indices.extend(next_indices.into_iter().map(|i| i + offset));
+                        }
+                        (MeshData::Textured { verts, indices, .. }, MeshData::Textured { verts: next_verts, indices: next_indices, .. }) => {
+                            if verts.len() + next_verts.len() > u16::MAX as usize {
+                                Self::submit_batch(device, bitmaps, batch);
+                                *batch = entry;
+                                continue;
+                            }
+                            let offset = verts.len() as u16;
+                            verts.extend(next_verts);
+                            indices.extend(next_indices.into_iter().map(|i| i + offset));
+                        }
+                        _ => {
+                            Self::submit_batch(device, bitmaps, batch);
+                            *batch = entry;
+                        }
+                    }
+                    continue;
+                }
+                Self::submit_batch(device, bitmaps, batch);
+            }
+            current = Some(entry);
+        }
+
+        if let Some(batch) = current.as_ref() {
+            Self::submit_batch(device, bitmaps, batch);
+        }
+    }
+
+    fn submit_batch<D: RenderDevice>(device: &mut D, bitmaps: &BitmapCache, batch: &QueuedMesh) {
+        match (&batch.kind, &batch.data) {
+            (MeshKind::Solid, MeshData::Solid { verts, indices }) => {
+                if let Some([r, g, b]) = batch.state.color {
+                    device.fill_tris_solid(verts, indices, 0, 0, r, g, b);
+                }
+            }
+            (MeshKind::Wireframe, MeshData::Solid { verts, indices }) => {
+                if let Some([r, g, b]) = batch.state.color {
+                    device.draw_tris_wireframe(verts, indices, 0, 0, r, g, b);
+                }
+            }
+            (MeshKind::Textured, MeshData::Textured { verts, indices, color_transform }) => {
+                if let Some(texture) = batch.state.texture.and_then(|key| bitmaps.get(key)) {
+                    device.draw_tris_textured(verts, indices, texture, *color_transform);
+                }
+            }
+            _ => {}
+        }
+    }
 
     pub fn execute<D: RenderDevice>(&mut self, packet: &FramePacket, device: &mut D, caches: &SharedCaches) {
         let sw = device.surface_width();
@@ -134,6 +289,7 @@ impl CommandExecutor {
         let bitmaps = caches.bitmaps.lock().unwrap();
         let shapes = caches.shapes.lock().unwrap();
         let mut mask_stack: Vec<RectI> = Vec::new();
+        self.frame_queue.clear();
 
         let mut mesh_tris = 0u32;
         let mut rect_fastpath = 0u32;
@@ -142,6 +298,7 @@ impl CommandExecutor {
         for cmd in &packet.cmds {
             match cmd {
                 RenderCmd::FillRect { rect, color_key, wireframe } => {
+                    self.flush_if_pending(device, &bitmaps);
                     let (cr, cg, cb) = color_from_key(*color_key);
                     device.fill_rect(*rect, cr, cg, cb);
                     if *wireframe {
@@ -182,6 +339,7 @@ impl CommandExecutor {
                                 if let Some((tx, ty)) = int_translation {
                                     rect_fastpath = rect_fastpath.saturating_add(1);
                                     let rect = RectI { x: local.x + tx, y: local.y + ty, w: local.w, h: local.h };
+                                    self.flush_if_pending(device, &bitmaps);
                                     device.fill_rect(rect, cr, cg, cb);
                                     if *wireframe {
                                         device.stroke_rect(rect, 255, 255, 255);
@@ -206,6 +364,7 @@ impl CommandExecutor {
                                     let h = (maxy.ceil() as i32).saturating_sub(y);
                                     if w > 0 && h > 0 {
                                         let rect = RectI { x, y, w, h };
+                                        self.flush_if_pending(device, &bitmaps);
                                         device.fill_rect(rect, cr, cg, cb);
                                         if *wireframe {
                                             device.stroke_rect(rect, 255, 255, 255);
@@ -213,22 +372,88 @@ impl CommandExecutor {
                                     }
                                 } else {
                                     mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
-                                    device.fill_tris_solid_affine(&mesh.verts, &mesh.indices, *transform, cr, cg, cb);
+                                    let verts = transform_mesh_vertices(&mesh.verts, *transform);
+                                    self.draw_mesh(QueuedMesh {
+                                        kind: MeshKind::Solid,
+                                        state: MeshState {
+                                            texture: None,
+                                            blend: BlendMode::Opaque,
+                                            color: Some([cr, cg, cb]),
+                                            color_transform: None,
+                                        },
+                                        data: MeshData::Solid { verts, indices: mesh.indices.clone() },
+                                    });
                                     if *wireframe {
-                                        device.draw_tris_wireframe_affine(&mesh.verts, &mesh.indices, *transform, 255, 255, 255);
+                                        self.draw_mesh(QueuedMesh {
+                                            kind: MeshKind::Wireframe,
+                                            state: MeshState {
+                                                texture: None,
+                                                blend: BlendMode::Opaque,
+                                                color: Some([255, 255, 255]),
+                                                color_transform: None,
+                                            },
+                                            data: MeshData::Solid {
+                                                verts: transform_mesh_vertices(&mesh.verts, *transform),
+                                                indices: mesh.indices.clone(),
+                                            },
+                                        });
                                     }
                                 }
                             } else if let Some((tx, ty)) = int_translation {
                                 mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
-                                device.fill_tris_solid(&mesh.verts, &mesh.indices, tx, ty, cr, cg, cb);
+                                let verts = transform_mesh_vertices(&mesh.verts, *transform);
+                                self.draw_mesh(QueuedMesh {
+                                    kind: MeshKind::Solid,
+                                    state: MeshState {
+                                        texture: None,
+                                        blend: BlendMode::Opaque,
+                                        color: Some([cr, cg, cb]),
+                                        color_transform: None,
+                                    },
+                                    data: MeshData::Solid { verts, indices: mesh.indices.clone() },
+                                });
                                 if *wireframe {
-                                    device.draw_tris_wireframe(&mesh.verts, &mesh.indices, tx, ty, 255, 255, 255);
+                                    self.draw_mesh(QueuedMesh {
+                                        kind: MeshKind::Wireframe,
+                                        state: MeshState {
+                                            texture: None,
+                                            blend: BlendMode::Opaque,
+                                            color: Some([255, 255, 255]),
+                                            color_transform: None,
+                                        },
+                                        data: MeshData::Solid {
+                                            verts: transform_mesh_vertices(&mesh.verts, *transform),
+                                            indices: mesh.indices.clone(),
+                                        },
+                                    });
                                 }
                             } else {
                                 mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
-                                device.fill_tris_solid_affine(&mesh.verts, &mesh.indices, *transform, cr, cg, cb);
+                                let verts = transform_mesh_vertices(&mesh.verts, *transform);
+                                self.draw_mesh(QueuedMesh {
+                                    kind: MeshKind::Solid,
+                                    state: MeshState {
+                                        texture: None,
+                                        blend: BlendMode::Opaque,
+                                        color: Some([cr, cg, cb]),
+                                        color_transform: None,
+                                    },
+                                    data: MeshData::Solid { verts, indices: mesh.indices.clone() },
+                                });
                                 if *wireframe {
-                                    device.draw_tris_wireframe_affine(&mesh.verts, &mesh.indices, *transform, 255, 255, 255);
+                                    self.draw_mesh(QueuedMesh {
+                                        kind: MeshKind::Wireframe,
+                                        state: MeshState {
+                                            texture: None,
+                                            blend: BlendMode::Opaque,
+                                            color: Some([255, 255, 255]),
+                                            color_transform: None,
+                                        },
+                                        data: MeshData::Solid {
+                                            verts: transform_mesh_vertices(&mesh.verts, *transform),
+                                            indices: mesh.indices.clone(),
+                                        },
+                                    });
                                 }
                             }
                         } else {
@@ -259,6 +484,7 @@ impl CommandExecutor {
                             bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             // Safe fallback: bounds rect.
                             let rect = rect_aabb_transformed(b, *transform);
+                            self.flush_if_pending(device, &bitmaps);
                             device.fill_rect(rect, fallback_r, fallback_g, fallback_b);
                             if *wireframe {
                                 device.stroke_rect(rect, 255, 255, 255);
@@ -295,16 +521,31 @@ impl CommandExecutor {
                         let verts_ok = !mesh.verts.is_empty();
                         if indices_ok && verts_ok {
                             mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
-                            if let Some((tx, ty)) = int_translation {
-                                device.fill_tris_solid(&mesh.verts, &mesh.indices, tx, ty, cr, cg, cb);
-                                if *wireframe {
-                                    device.draw_tris_wireframe(&mesh.verts, &mesh.indices, tx, ty, 255, 255, 255);
-                                }
-                            } else {
-                                device.fill_tris_solid_affine(&mesh.verts, &mesh.indices, *transform, cr, cg, cb);
-                                if *wireframe {
-                                    device.draw_tris_wireframe_affine(&mesh.verts, &mesh.indices, *transform, 255, 255, 255);
-                                }
+                            let verts = transform_mesh_vertices(&mesh.verts, *transform);
+                            self.draw_mesh(QueuedMesh {
+                                kind: MeshKind::Solid,
+                                state: MeshState {
+                                    texture: None,
+                                    blend: BlendMode::Opaque,
+                                    color: Some([cr, cg, cb]),
+                                    color_transform: None,
+                                },
+                                data: MeshData::Solid { verts, indices: mesh.indices.clone() },
+                            });
+                            if *wireframe {
+                                self.draw_mesh(QueuedMesh {
+                                    kind: MeshKind::Wireframe,
+                                    state: MeshState {
+                                        texture: None,
+                                        blend: BlendMode::Opaque,
+                                        color: Some([255, 255, 255]),
+                                        color_transform: None,
+                                    },
+                                    data: MeshData::Solid {
+                                        verts: transform_mesh_vertices(&mesh.verts, *transform),
+                                        indices: mesh.indices.clone(),
+                                    },
+                                });
                             }
                         } else {
                             shapes.record_invalid_fill_mesh();
@@ -330,6 +571,7 @@ impl CommandExecutor {
                         if let Some(b) = shapes.get_bounds(*shape_key) {
                             bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             let rect = rect_aabb_transformed(b, *transform);
+                            self.flush_if_pending(device, &bitmaps);
                             device.fill_rect(rect, fallback_r, fallback_g, fallback_b);
                             if *wireframe {
                                 device.stroke_rect(rect, 255, 255, 255);
@@ -355,16 +597,31 @@ impl CommandExecutor {
                         let verts_ok = !mesh.verts.is_empty();
                         if indices_ok && verts_ok {
                             mesh_tris = mesh_tris.saturating_add((mesh.indices.len() as u32) / 3);
-                            if let Some((tx, ty)) = int_translation {
-                                device.fill_tris_solid(&mesh.verts, &mesh.indices, tx, ty, *r, *g, *b);
-                                if *wireframe {
-                                    device.draw_tris_wireframe(&mesh.verts, &mesh.indices, tx, ty, 255, 255, 255);
-                                }
-                            } else {
-                                device.fill_tris_solid_affine(&mesh.verts, &mesh.indices, *transform, *r, *g, *b);
-                                if *wireframe {
-                                    device.draw_tris_wireframe_affine(&mesh.verts, &mesh.indices, *transform, 255, 255, 255);
-                                }
+                            let verts = transform_mesh_vertices(&mesh.verts, *transform);
+                            self.draw_mesh(QueuedMesh {
+                                kind: MeshKind::Solid,
+                                state: MeshState {
+                                    texture: None,
+                                    blend: BlendMode::Opaque,
+                                    color: Some([*r, *g, *b]),
+                                    color_transform: None,
+                                },
+                                data: MeshData::Solid { verts, indices: mesh.indices.clone() },
+                            });
+                            if *wireframe {
+                                self.draw_mesh(QueuedMesh {
+                                    kind: MeshKind::Wireframe,
+                                    state: MeshState {
+                                        texture: None,
+                                        blend: BlendMode::Opaque,
+                                        color: Some([255, 255, 255]),
+                                        color_transform: None,
+                                    },
+                                    data: MeshData::Solid {
+                                        verts: transform_mesh_vertices(&mesh.verts, *transform),
+                                        indices: mesh.indices.clone(),
+                                    },
+                                });
                             }
                         } else {
                             shapes.record_invalid_stroke_mesh();
@@ -391,11 +648,13 @@ impl CommandExecutor {
                             shapes.record_stroke_bounds_fallback();
                             bounds_fallbacks = bounds_fallbacks.saturating_add(1);
                             let rect = rect_aabb_transformed(bnd, *transform);
+                            self.flush_if_pending(device, &bitmaps);
                             device.stroke_rect(rect, *r, *g, *b);
                         }
                     }
                 }
                 RenderCmd::PushMaskRect { rect } => {
+                    self.flush_if_pending(device, &bitmaps);
                     if !config::masks_enabled() {
                         let n = MASK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
                         if n < 4 {
@@ -415,12 +674,14 @@ impl CommandExecutor {
                     device.set_scissor(Some(next));
                 }
                 RenderCmd::PushMaskShape { .. } => {
+                    self.flush_if_pending(device, &bitmaps);
                     let n = MASK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
                     if n < 4 {
                         runlog::warn_line("shape masks unsupported; ignoring");
                     }
                 }
                 RenderCmd::PopMask => {
+                    self.flush_if_pending(device, &bitmaps);
                     if mask_stack.pop().is_some() {
                         let rect = mask_stack.last().copied();
                         device.set_scissor(rect);
@@ -436,6 +697,7 @@ impl CommandExecutor {
                     if let Some(src) = bitmaps.get(*bitmap_key) {
                         let use_blit = transform.is_identity() && uv.is_full() && color_transform.is_none();
                         if use_blit {
+                            self.flush_if_pending(device, &bitmaps);
                             device.blit_rgba(transform.tx.round() as i32, transform.ty.round() as i32, src);
                             continue;
                         }
@@ -462,14 +724,30 @@ impl CommandExecutor {
                             TexVertex { x: x3, y: y3, u: uv.u0, v: uv.v1 },
                         ];
                         let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
-                        device.draw_tris_textured(&verts, &indices, src, *color_transform);
+                        let state = MeshState {
+                            texture: Some(*bitmap_key),
+                            blend: BlendMode::Opaque,
+                            color: None,
+                            color_transform: ColorTransformKey::from_transform(*color_transform),
+                        };
+                        self.draw_mesh(QueuedMesh {
+                            kind: MeshKind::Textured,
+                            state,
+                            data: MeshData::Textured {
+                                verts: verts.to_vec(),
+                                indices: indices.to_vec(),
+                                color_transform: *color_transform,
+                            },
+                        });
                     }
                 }
                 RenderCmd::DebugAffineRect { transform, r, g, b } => {
+                    self.flush_if_pending(device, &bitmaps);
                     device.fill_tris_solid_affine(&DEBUG_AFFINE_VERTS, &DEBUG_AFFINE_INDICES, *transform, *r, *g, *b);
                     device.draw_tris_wireframe_affine(&DEBUG_AFFINE_VERTS, &DEBUG_AFFINE_INDICES, *transform, 255, 255, 255);
                 }
                 RenderCmd::DebugLoadingIndicator => {
+                    self.flush_if_pending(device, &bitmaps);
                     // More intuitive "loading" indicator without text:
                     // a bordered bar with an animated highlight moving left→right.
                     //
@@ -517,6 +795,8 @@ impl CommandExecutor {
                 }
             }
         }
+
+        self.flush_frame(device, &bitmaps);
 
         LAST_MESH_TRIS.store(mesh_tris, Ordering::Relaxed);
         LAST_RECT_FASTPATH.store(rect_fastpath, Ordering::Relaxed);
