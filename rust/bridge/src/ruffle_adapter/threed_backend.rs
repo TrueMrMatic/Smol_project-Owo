@@ -379,8 +379,10 @@ impl ThreeDSBackend {
             }
         };
 
-        let (fill_missing, fill_invalid, fill_bounds) = self.caches.shapes.lock().unwrap().stats();
-        let (stroke_missing, stroke_invalid, stroke_bounds) = self.caches.shapes.lock().unwrap().stroke_stats();
+        let shapes_cache = self.caches.shapes.lock().unwrap();
+        let (fill_missing, fill_invalid, fill_bounds) = shapes_cache.stats();
+        let (stroke_missing, stroke_invalid, stroke_bounds) = shapes_cache.stroke_stats();
+        let (cache_used_bytes, cache_budget_bytes, cache_evicted_entries, cache_evicted_bytes) = shapes_cache.mem_stats();
         let draw_stats = crate::render::executor::last_draw_stats();
         let runlog_info = runlog::snapshot_info();
 
@@ -423,6 +425,13 @@ impl ThreeDSBackend {
             stroke_missing,
             stroke_invalid,
             stroke_bounds
+        ));
+        out.push_str(&format!(
+            "shape_cache_mem used_kb={} budget_kb={} evicted_entries={} evicted_kb={}\n",
+            cache_used_bytes / 1024,
+            cache_budget_bytes / 1024,
+            cache_evicted_entries,
+            cache_evicted_bytes / 1024
         ));
         out.push_str(&format!(
             "draw_stats mesh_tris={} rect_fastpath={} bounds_fallbacks={}\n",
@@ -524,6 +533,7 @@ impl RenderBackend for ThreeDSBackend {
                     runlog::stage(&format!("register_shape id={} tess_timeout", id), 0);
                     (Vec::new(), true, false, 0, 0, 0, 0)
                 }
+                Err(tessellate::TessError::EarcutDenied) => (Vec::new(), true, false, 0, 0, 0, 0),
                 Err(_) => (Vec::new(), true, false, 0, 0, 0, 0),
             };
         let fills_ms = fills_start.elapsed().as_millis() as u64;
@@ -552,6 +562,7 @@ impl RenderBackend for ThreeDSBackend {
 
         self.caches.shapes.lock().unwrap().insert_meshes(
             key,
+            id,
             bounds,
             fills,
             fill_failed,
@@ -747,6 +758,8 @@ impl RenderBackend for ThreeDSBackend {
                         if tr.x + tr.w <= 0 || tr.y + tr.h <= 0 || tr.x >= 400 || tr.y >= 240 {
                             continue;
                         }
+
+                        shapes_cache.touch(key);
 
                         let is_text = shapes_cache.is_text_shape(key);
                         if shapes_cache.has_mesh(key) {
