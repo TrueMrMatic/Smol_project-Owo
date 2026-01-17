@@ -101,7 +101,8 @@ fn swf_basename(p: &str) -> String {
 fn pick_run_dir(root_path: &str) -> String {
     // Primary: keep runs next to your SWFs folder (what you requested in the protocol)
     let swf = swf_basename(root_path);
-    let primary = format!("sdmc:/flash/_runs/{}/{}", BUILD_ID, swf);
+    let timestamp = now_ms();
+    let primary = format!("sdmc:/flash/_runs/{}/{}_{}", BUILD_ID, timestamp, swf);
     let _ = ensure_dir(&primary);
     primary
 }

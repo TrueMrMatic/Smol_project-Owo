@@ -362,6 +362,7 @@ Theme: Earcut boottrace markers
 - Earcut inputs are now sanitized (deduped/zero-length edges removed) and degenerate outer rings are rejected early with `earcut_skip` markers.
 - Shape mesh caching now enforces a fixed memory budget with LRU eviction; oversized shapes are dropped to bounds-only entries.
 - Status snapshots now include `shape_cache_mem` lines with cache usage and eviction totals.
+- Run logs now create a fresh timestamped folder per SWF selection under `_runs`, so logs never overwrite earlier sessions.
 
 ## Risks / Watch-outs
 - None; logging only.
