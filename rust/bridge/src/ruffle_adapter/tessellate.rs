@@ -323,6 +323,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
         for mut group in groups {
             if fill_start.elapsed().as_millis() as u64 > FILL_PATH_BUDGET_MS {
                 let (group_pts, outer_pts, _hole_pts) = group_point_counts(&group);
+                #[cfg(feature = "verbose_logs")]
                 runlog::log_important(&format!(
                     "earcut_skip timeout shape={} total_pts={} holes={} outer_pts={}",
                     shape_id,
@@ -363,6 +364,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                 triangulate_convex_fan(base, ring_len, &mut out_indices);
                 if !logged_convex_fan {
                     logged_convex_fan = true;
+                    #[cfg(feature = "verbose_logs")]
                     runlog::log_important(&format!(
                         "triangulate_convex_fan shape={} pts={}",
                         shape_id,
@@ -384,6 +386,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                     holes,
                     outer_pts
                 ));
+                #[cfg(feature = "verbose_logs")]
                 runlog::stage(
                     &format!(
                         "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_ring",
@@ -408,6 +411,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                         holes,
                         outer_pts
                     ));
+                    #[cfg(feature = "verbose_logs")]
                     runlog::stage(
                         &format!(
                             "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_ring",
@@ -439,6 +443,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                     holes,
                     outer_pts
                 ));
+                #[cfg(feature = "verbose_logs")]
                 runlog::stage(
                     &format!(
                         "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_area",
@@ -461,6 +466,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                     outer_pts,
                     reason
                 ));
+                #[cfg(feature = "verbose_logs")]
                 runlog::stage(
                     &format!(
                         "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason={}",
@@ -491,6 +497,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
             }
             if fill_start.elapsed().as_millis() as u64 > FILL_PATH_BUDGET_MS {
                 let (group_pts, outer_pts, _hole_pts) = group_point_counts(&group);
+                #[cfg(feature = "verbose_logs")]
                 runlog::log_important(&format!(
                     "earcut_skip timeout shape={} total_pts={} holes={} outer_pts={}",
                     shape_id,
@@ -502,6 +509,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                 break;
             }
 
+            #[cfg(feature = "verbose_logs")]
             runlog::stage(
                 &format!(
                     "earcut_input shape={} pts={} holes={}",
@@ -511,6 +519,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                 ),
                 0,
             );
+            #[cfg(feature = "verbose_logs")]
             runlog::log_important(&format!(
                 "earcut_input shape={} total_pts={} holes={} outer_pts={}",
                 shape_id,
@@ -528,6 +537,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                 ));
                 TessError::EarcutFailed
             })?;
+            #[cfg(feature = "verbose_logs")]
             runlog::log_important(&format!(
                 "earcut_done shape={} tris={}",
                 shape_id,
@@ -664,12 +674,7 @@ pub fn tessellate_strokes(shape: &DistilledShape<'_>, shape_id: u32) -> Result<S
     }
 
     if strokes.is_empty() {
-        if stroke_paths == 0 {
-            runlog::warn_line(&format!(
-                "tessellate_strokes no_stroke_paths shape={}",
-                shape_id
-            ));
-        } else {
+        if stroke_paths > 0 {
             runlog::warn_line(&format!(
                 "tessellate_strokes no_contours shape={} paths={}",
                 shape_id, stroke_paths
@@ -680,13 +685,8 @@ pub fn tessellate_strokes(shape: &DistilledShape<'_>, shape_id: u32) -> Result<S
     Ok(StrokeOutput { strokes, any_failed })
 }
 
-fn tessellation_tolerance_px(shape: &DistilledShape<'_>) -> f32 {
-    let bounds = shape.shape_bounds;
-    let w = (bounds.x_max - bounds.x_min).to_pixels().abs() as f32;
-    let h = (bounds.y_max - bounds.y_min).to_pixels().abs() as f32;
-    let max_dim = w.max(h).max(1.0);
-    let base = (max_dim * 0.004).clamp(0.6, 2.5);
-    base
+fn tessellation_tolerance_px(_shape: &DistilledShape<'_>) -> f32 {
+    0.5
 }
 
 // -----------------

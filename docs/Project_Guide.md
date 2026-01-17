@@ -19,6 +19,7 @@ Current keys:
 
 ## Current renderer status
 - Displays basic frames via a `CommandList` emitted from Ruffle to the 3DS backend.
+- Mesh rendering is batched per frame: draw calls are queued and adjacent meshes sharing the same state (texture, blend, and material color/transform) are merged before submission to reduce PICA200 overhead.
 - Supports a minimal subset of shape drawing (bounds rectangles and/or triangle fill meshes depending on mode).
 - Not feature-complete: strokes, gradients, bitmaps, text, masks, blend modes, filters are incomplete or missing.
 

@@ -35,6 +35,7 @@ use ruffle_render::pixel_bender::{PixelBenderShader, PixelBenderShaderHandle};
 use ruffle_render::pixel_bender_support::PixelBenderShaderArgument;
 
 use crate::render::{ColorTransform, FramePacket, Matrix2D, RenderCmd, RectI, SharedCaches, TexUvRect};
+use crate::render::cache::shapes::{FillMesh, FillPaint, Vertex2};
 use crate::render::cache::bitmaps::BitmapSurface;
 use ruffle_core::swf::ColorTransform as SwfColorTransform;
 
@@ -45,6 +46,7 @@ type ShapeKey = usize;
 
 const MAX_TRIS_PER_FRAME: u32 = 8000;
 const MAX_UNSUPPORTED_FILL_WARNINGS: u32 = 8;
+const SHAPE_WATCHDOG_MS: u64 = 15;
 static UNSUPPORTED_FILL_DRAW_WARNINGS: AtomicU32 = AtomicU32::new(0);
 
 fn to_color_transform(ct: SwfColorTransform) -> Option<ColorTransform> {
@@ -294,6 +296,30 @@ impl ThreeDSBackend {
         s.debug_affine_overlay
     }
 
+    fn shape_timeout_fallback(
+        &mut self,
+        key: ShapeKey,
+        id: u32,
+        bounds: RectI,
+        elapsed_ms: u64,
+        stage: &str,
+        handle_impl: &Arc<ThreeDSShapeHandleImpl>,
+    ) -> ShapeHandle {
+        runlog::warn_line(&format!(
+            "Shape Timeout id={} elapsed_ms={} stage={}",
+            id, elapsed_ms, stage
+        ));
+        runlog::stage(&format!("register_shape id={} shape_timeout", id), 0);
+        self.caches.shapes.lock().unwrap().insert_bounds_failed(key, bounds);
+
+        let mut s = self.shared.lock().unwrap();
+        s.diagnostics.shapes_registered = s.diagnostics.shapes_registered.saturating_add(1);
+        s.diagnostics.total_tess_ms_fills = s.diagnostics.total_tess_ms_fills.saturating_add(elapsed_ms);
+        s.diagnostics.total_tess_ms_strokes = s.diagnostics.total_tess_ms_strokes.saturating_add(0);
+        s.diagnostics.max_tess_ms_single_shape = s.diagnostics.max_tess_ms_single_shape.max(elapsed_ms);
+        ShapeHandle(Arc::clone(handle_impl))
+    }
+
 
     pub fn is_ready(&self) -> bool {
         let s = self.shared.lock().unwrap();
@@ -491,6 +517,10 @@ impl RenderBackend for ThreeDSBackend {
 
     fn set_viewport_dimensions(&mut self, _dimensions: ViewportDimensions) {}
 
+    /// Register and tessellate a shape at load time.
+    ///
+    /// Fail-fast safety: if tessellation/earcut work for this shape exceeds 15ms wall-clock,
+    /// registration aborts immediately, logs a "Shape Timeout", and falls back to bounds-only rendering.
     fn register_shape(&mut self, shape: DistilledShape<'_>, _bitmap: &dyn BitmapSource) -> ShapeHandle {
         // Timing logs capture tessellation hotspots per shape so we can correlate slow meshes
         // with shape IDs/bounds without altering the render path.
@@ -506,19 +536,52 @@ impl RenderBackend for ThreeDSBackend {
         let y1 = b.y_max.to_pixels() as i32;
         let bounds = RectI { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 
-        // Step 2A: tessellate fills once at registration time and cache the meshes.
-        //
-        // Shapes commonly contain multiple fills, so we cache one mesh per fill. If some fills
-        // fail (hard cases), we still keep the successful ones and mark `tess_failed` so the HUD
-        // can warn when that shape is drawn.
-        runlog::stage(&format!("register_shape id={} pre_tess", id), 0);
-        if runlog::is_verbose() {
-            runlog::log_line(&format!("register_shape begin id={} b={} {} {} {}", id, bounds.x, bounds.y, bounds.w, bounds.h));
-        }
+        let text_shape = is_text_shape(&shape);
+        if text_shape {
+            let x0 = bounds.x;
+            let y0 = bounds.y;
+            let x1 = bounds.x + bounds.w;
+            let y1 = bounds.y + bounds.h;
+            let verts = vec![
+                Vertex2 { x: x0, y: y0 },
+                Vertex2 { x: x1, y: y0 },
+                Vertex2 { x: x1, y: y1 },
+                Vertex2 { x: x0, y: y1 },
+            ];
+            let indices: Vec<u16> = vec![0, 1, 2, 0, 2, 3];
+            let fills = vec![FillMesh { verts, indices, paint: FillPaint::Unsupported }];
+            self.caches.shapes.lock().unwrap().insert_meshes(
+                key,
+                id,
+                bounds,
+                fills,
+                false,
+                false,
+                Vec::new(),
+                false,
+                false,
+                true,
+            );
 
-        let fills_start = Instant::now();
-        let (fills, fill_failed, fill_partial, group_used_more_correct, group_used_fast, group_used_trivial, unsupported_fill_paints) =
-            match tessellate::tessellate_fills(&shape, id) {
+            let mut s = self.shared.lock().unwrap();
+            s.diagnostics.shapes_registered = s.diagnostics.shapes_registered.saturating_add(1);
+            ShapeHandle(handle_impl)
+        } else {
+            // Step 2A: tessellate fills once at registration time and cache the meshes.
+            //
+            // Shapes commonly contain multiple fills, so we cache one mesh per fill. If some fills
+            // fail (hard cases), we still keep the successful ones and mark `tess_failed` so the HUD
+            // can warn when that shape is drawn.
+            runlog::stage(&format!("register_shape id={} pre_tess", id), 0);
+            if runlog::is_verbose() {
+                runlog::log_line(&format!("register_shape begin id={} b={} {} {} {}", id, bounds.x, bounds.y, bounds.w, bounds.h));
+            }
+
+            let shape_start = Instant::now();
+
+            let fills_start = Instant::now();
+            let (fills, fill_failed, fill_partial, group_used_more_correct, group_used_fast, group_used_trivial, unsupported_fill_paints) =
+                match tessellate::tessellate_fills(&shape, id) {
                 Ok(res) => (
                     res.fills,
                     false,
@@ -535,115 +598,136 @@ impl RenderBackend for ThreeDSBackend {
                 }
                 Err(tessellate::TessError::EarcutDenied) => (Vec::new(), true, false, 0, 0, 0, 0),
                 Err(_) => (Vec::new(), true, false, 0, 0, 0, 0),
+                };
+            let fills_ms = fills_start.elapsed().as_millis() as u64;
+            let elapsed_ms = shape_start.elapsed().as_millis() as u64;
+            if elapsed_ms > SHAPE_WATCHDOG_MS {
+                return self.shape_timeout_fallback(key, id, bounds, elapsed_ms, "post_fills", &handle_impl);
+            }
+            let skip_strokes = shape.line_styles.is_empty();
+            let (strokes, stroke_failed, stroke_partial, strokes_ms) = if skip_strokes {
+                (Vec::new(), false, false, 0)
+            } else {
+                let elapsed_ms = shape_start.elapsed().as_millis() as u64;
+                if elapsed_ms > SHAPE_WATCHDOG_MS {
+                    return self.shape_timeout_fallback(key, id, bounds, elapsed_ms, "pre_strokes", &handle_impl);
+                }
+                let strokes_start = Instant::now();
+                let (strokes, stroke_failed, stroke_partial) = match tessellate::tessellate_strokes(&shape, id) {
+                    Ok(res) => (res.strokes, false, res.any_failed),
+                    Err(tessellate::TessError::NoContours) => (Vec::new(), false, false),
+                    Err(_) => (Vec::new(), true, false),
+                };
+                let strokes_ms = strokes_start.elapsed().as_millis() as u64;
+                (strokes, stroke_failed, stroke_partial, strokes_ms)
             };
-        let fills_ms = fills_start.elapsed().as_millis() as u64;
-        let strokes_start = Instant::now();
-        let (strokes, stroke_failed, stroke_partial) = match tessellate::tessellate_strokes(&shape, id) {
-            Ok(res) => (res.strokes, false, res.any_failed),
-            Err(tessellate::TessError::NoContours) => (Vec::new(), false, false),
-            Err(_) => (Vec::new(), true, false),
-        };
-        let strokes_ms = strokes_start.elapsed().as_millis() as u64;
+            let elapsed_ms = shape_start.elapsed().as_millis() as u64;
+            if elapsed_ms > SHAPE_WATCHDOG_MS {
+                return self.shape_timeout_fallback(key, id, bounds, elapsed_ms, "post_strokes", &handle_impl);
+            }
 
-        let text_shape = is_text_shape(&shape);
+            let (fill_count, stroke_count, fill_tris, stroke_tris) = if runlog::is_verbose() {
+                let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
+                let stroke_tris: u32 = if skip_strokes {
+                    0
+                } else {
+                    strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum()
+                };
+                (
+                    Some(fills.len()),
+                    Some(strokes.len()),
+                    Some(fill_tris),
+                    Some(stroke_tris),
+                )
+            } else {
+                (None, None, None, None)
+            };
 
-        let (fill_count, stroke_count, fill_tris, stroke_tris) = if runlog::is_verbose() {
-            let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
-            let stroke_tris: u32 = strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
-            (
-                Some(fills.len()),
-                Some(strokes.len()),
-                Some(fill_tris),
-                Some(stroke_tris),
-            )
-        } else {
-            (None, None, None, None)
-        };
-
-        self.caches.shapes.lock().unwrap().insert_meshes(
-            key,
-            id,
-            bounds,
-            fills,
-            fill_failed,
-            fill_partial,
-            strokes,
-            stroke_failed,
-            stroke_partial,
-            text_shape,
-        );
-
-        if runlog::is_verbose() {
-            runlog::log_line(&format!(
-                "shape_summary id={} b={} {} {} {} fills={} fill_tris={} strokes={} stroke_tris={} tess_failed={} tess_partial={} stroke_failed={} stroke_partial={} text={} group_more_correct={} group_fast={} group_trivial={} unsupported_fills={}",
+            self.caches.shapes.lock().unwrap().insert_meshes(
+                key,
                 id,
-                bounds.x,
-                bounds.y,
-                bounds.w,
-                bounds.h,
-                fill_count.unwrap_or(0),
-                fill_tris.unwrap_or(0),
-                stroke_count.unwrap_or(0),
-                stroke_tris.unwrap_or(0),
+                bounds,
+                fills,
                 fill_failed,
                 fill_partial,
+                strokes,
                 stroke_failed,
                 stroke_partial,
                 text_shape,
-                group_used_more_correct,
-                group_used_fast,
-                group_used_trivial,
-                unsupported_fill_paints
-            ));
-            runlog::log_line(&format!(
-                "shape_register_timing summary id={} b={} {} {} {} fills_ms={} strokes_ms={} fills={} fill_tris={} strokes={} stroke_tris={}",
-                id,
-                bounds.x,
-                bounds.y,
-                bounds.w,
-                bounds.h,
-                fills_ms,
-                strokes_ms,
-                fill_count.unwrap_or(0),
-                fill_tris.unwrap_or(0),
-                stroke_count.unwrap_or(0),
-                stroke_tris.unwrap_or(0)
-            ));
-        }
+            );
 
-        if fill_failed {
             if runlog::is_verbose() {
-                runlog::warn_line(&format!("tessellate_fills fallback_bounds id={}", id));
-            } else if (id % 25) == 0 {
-                runlog::log_important(&format!("tessellate_fills fallback_bounds id={} (sampled)", id));
+                runlog::log_line(&format!(
+                    "shape_summary id={} b={} {} {} {} fills={} fill_tris={} strokes={} stroke_tris={} tess_failed={} tess_partial={} stroke_failed={} stroke_partial={} text={} group_more_correct={} group_fast={} group_trivial={} unsupported_fills={}",
+                    id,
+                    bounds.x,
+                    bounds.y,
+                    bounds.w,
+                    bounds.h,
+                    fill_count.unwrap_or(0),
+                    fill_tris.unwrap_or(0),
+                    stroke_count.unwrap_or(0),
+                    stroke_tris.unwrap_or(0),
+                    fill_failed,
+                    fill_partial,
+                    stroke_failed,
+                    stroke_partial,
+                    text_shape,
+                    group_used_more_correct,
+                    group_used_fast,
+                    group_used_trivial,
+                    unsupported_fill_paints
+                ));
+                runlog::log_line(&format!(
+                    "shape_register_timing summary id={} b={} {} {} {} fills_ms={} strokes_ms={} fills={} fill_tris={} strokes={} stroke_tris={}",
+                    id,
+                    bounds.x,
+                    bounds.y,
+                    bounds.w,
+                    bounds.h,
+                    fills_ms,
+                    strokes_ms,
+                    fill_count.unwrap_or(0),
+                    fill_tris.unwrap_or(0),
+                    stroke_count.unwrap_or(0),
+                    stroke_tris.unwrap_or(0)
+                ));
             }
-            runlog::stage(&format!("register_shape id={} fill_fallback_bounds", id), 0);
-        } else if runlog::is_verbose() {
-            runlog::log_line(&format!("tessellate_fills ok id={} any_failed={}", id, fill_partial));
+
+            if fill_failed {
+                if runlog::is_verbose() {
+                    runlog::warn_line(&format!("tessellate_fills fallback_bounds id={}", id));
+                } else if (id % 25) == 0 {
+                    runlog::log_important(&format!("tessellate_fills fallback_bounds id={} (sampled)", id));
+                }
+                runlog::stage(&format!("register_shape id={} fill_fallback_bounds", id), 0);
+            } else if runlog::is_verbose() {
+                runlog::log_line(&format!("tessellate_fills ok id={} any_failed={}", id, fill_partial));
+            }
+
+            if stroke_failed && runlog::is_verbose() {
+                runlog::warn_line(&format!("tessellate_strokes fallback_bounds id={}", id));
+            } else if stroke_partial && runlog::is_verbose() {
+                runlog::log_line(&format!("tessellate_strokes partial id={}", id));
+            }
+
+            runlog::stage(&format!("register_shape id={} done", id), 0);
+
+            let mut s = self.shared.lock().unwrap();
+            s.diagnostics.shapes_registered = s.diagnostics.shapes_registered.saturating_add(1);
+            s.diagnostics.total_tess_ms_fills = s.diagnostics.total_tess_ms_fills.saturating_add(fills_ms);
+            s.diagnostics.total_tess_ms_strokes = s.diagnostics.total_tess_ms_strokes.saturating_add(strokes_ms);
+            let shape_total_ms = fills_ms.saturating_add(strokes_ms);
+            s.diagnostics.max_tess_ms_single_shape = s.diagnostics.max_tess_ms_single_shape.max(shape_total_ms);
+            s.diagnostics.total_group_more_correct = s.diagnostics.total_group_more_correct.saturating_add(group_used_more_correct);
+            s.diagnostics.total_group_fast = s.diagnostics.total_group_fast.saturating_add(group_used_fast);
+            s.diagnostics.total_group_trivial = s.diagnostics.total_group_trivial.saturating_add(group_used_trivial);
+            s.diagnostics.total_unsupported_fill_paints = s
+                .diagnostics
+                .total_unsupported_fill_paints
+                .saturating_add(unsupported_fill_paints);
+            ShapeHandle(handle_impl)
         }
-
-        if stroke_failed && runlog::is_verbose() {
-            runlog::warn_line(&format!("tessellate_strokes fallback_bounds id={}", id));
-        } else if stroke_partial && runlog::is_verbose() {
-            runlog::log_line(&format!("tessellate_strokes partial id={}", id));
-        }
-
-        runlog::stage(&format!("register_shape id={} done", id), 0);
-
-        let mut s = self.shared.lock().unwrap();
-        s.diagnostics.shapes_registered = s.diagnostics.shapes_registered.saturating_add(1);
-        s.diagnostics.total_tess_ms_fills = s.diagnostics.total_tess_ms_fills.saturating_add(fills_ms);
-        s.diagnostics.total_tess_ms_strokes = s.diagnostics.total_tess_ms_strokes.saturating_add(strokes_ms);
-        let shape_total_ms = fills_ms.saturating_add(strokes_ms);
-        s.diagnostics.max_tess_ms_single_shape = s.diagnostics.max_tess_ms_single_shape.max(shape_total_ms);
-        s.diagnostics.total_group_more_correct = s.diagnostics.total_group_more_correct.saturating_add(group_used_more_correct);
-        s.diagnostics.total_group_fast = s.diagnostics.total_group_fast.saturating_add(group_used_fast);
-        s.diagnostics.total_group_trivial = s.diagnostics.total_group_trivial.saturating_add(group_used_trivial);
-        s.diagnostics.total_unsupported_fill_paints = s
-            .diagnostics
-            .total_unsupported_fill_paints
-            .saturating_add(unsupported_fill_paints);
-        ShapeHandle(handle_impl)
     }
 
     fn submit_frame(&mut self, clear: Color, commands: CommandList, _cache: Vec<BitmapCacheEntry>) {
