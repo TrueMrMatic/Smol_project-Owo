@@ -339,3 +339,29 @@ Theme: Per-frame logging allocation reduction
 
 ## Notes
 - BUILD_ID remains unchanged in `runlog.rs` for now; it will be bumped in the next step.
+
+# Update Notes — PATCH_012_EARCUT_DIAGNOSTICS
+
+Build ID: PATCH_012_EARCUT_DIAGNOSTICS  
+Base: PATCH_011_RUNLOG_STAGE_ALLOC_FIX  
+Theme: Earcut boottrace markers
+
+## Summary
+- Added boottrace markers around earcut triangulation to make freezes diagnosable.
+- `last_stage.txt` now reports `earcut_input ...` just before earcut starts.
+
+## Changed files
+- rust/bridge/src/ruffle_adapter/tessellate.rs
+- docs/Update_Notes.md
+
+## Behavior changes
+- Important log lines now include `earcut_input` and `earcut_done` with point/triangle counts.
+- If a freeze occurs inside earcut, `last_stage.txt` will show the last `earcut_input ...` marker.
+- Earcut is now opt-in; when denied, `tessellate_fills` returns `EarcutDenied` and the renderer falls back to bounds rects.
+- Simple convex, hole-free contours now use a fast fan triangulation path before considering earcut.
+- Earcut inputs are now sanitized (deduped/zero-length edges removed) and degenerate outer rings are rejected early with `earcut_skip` markers.
+- Shape mesh caching now enforces a fixed memory budget with LRU eviction; oversized shapes are dropped to bounds-only entries.
+- Status snapshots now include `shape_cache_mem` lines with cache usage and eviction totals.
+
+## Risks / Watch-outs
+- None; logging only.

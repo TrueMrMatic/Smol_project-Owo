@@ -26,3 +26,4 @@ When a freeze happens, zip the entire `<BUILD_ID>` folder and share it back to t
 Notes:
 - Run bundles reinitialize per SWF selection (new folder per SWF).
 - Use **X** to request a one-frame command dump for deeper command-list correlation.
+- Boottrace may include `shape_cache_evict` lines when the shape cache exceeds its budget.

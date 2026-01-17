@@ -22,6 +22,7 @@ pub enum TessError {
     NoContours,
     TooManyVerts,
     EarcutFailed,
+    EarcutDenied,
     Timeout,
 }
 
@@ -32,8 +33,14 @@ const MAX_CONTOURS_PER_FILL: usize = 64;
 const MAX_TOTAL_CONTAINMENT_TESTS: usize = 4096;
 const FILL_PATH_BUDGET_MS: u64 = 60;
 const MAX_UNSUPPORTED_FILL_WARNINGS: u32 = 8;
+const EARCUT_MAX_TOTAL_POINTS: usize = 256;
+const EARCUT_MAX_HOLES: usize = 8;
+const EARCUT_MAX_OUTER_POINTS: usize = 192;
+const CONVEX_FAN_MAX_OUTER_POINTS: usize = 128;
 
 static UNSUPPORTED_FILL_WARNINGS: AtomicU32 = AtomicU32::new(0);
+
+type Point = (f32, f32);
 
 /// Output of shape tessellation.
 ///
@@ -72,6 +79,7 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
     let mut logged_cap_contours = false;
     let mut logged_cap_tests = false;
     let mut logged_timeout = false;
+    let mut logged_convex_fan = false;
 
     let tol_px = tessellation_tolerance_px(shape);
     for path in &shape.paths {
@@ -314,6 +322,14 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
         let mut timed_out = false;
         for mut group in groups {
             if fill_start.elapsed().as_millis() as u64 > FILL_PATH_BUDGET_MS {
+                let (group_pts, outer_pts, _hole_pts) = group_point_counts(&group);
+                runlog::log_important(&format!(
+                    "earcut_skip timeout shape={} total_pts={} holes={} outer_pts={}",
+                    shape_id,
+                    group_pts,
+                    group.holes.len(),
+                    outer_pts
+                ));
                 timed_out = true;
                 break;
             }
@@ -327,11 +343,140 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                 return Err(TessError::TooManyVerts);
             }
 
+            let (group_pts, outer_pts, _hole_pts) = group_point_counts(&group);
+            let holes = group.holes.len();
+            if holes == 0
+                && outer_pts >= 3
+                && outer_pts <= CONVEX_FAN_MAX_OUTER_POINTS
+                && is_convex_ring(&group.outer, CONVEX_FAN_MAX_OUTER_POINTS)
+            {
+                let ring_len = append_contour_vertices(&mut out_verts, &group.outer);
+                if base + ring_len > MAX_VERTS_PER_MESH {
+                    runlog::warn_line(&format!(
+                        "tessellate_fills too_many_verts shape={} verts={} paths={}",
+                        shape_id,
+                        out_verts.len(),
+                        fill_paths
+                    ));
+                    return Err(TessError::TooManyVerts);
+                }
+                triangulate_convex_fan(base, ring_len, &mut out_indices);
+                if !logged_convex_fan {
+                    logged_convex_fan = true;
+                    runlog::log_important(&format!(
+                        "triangulate_convex_fan shape={} pts={}",
+                        shape_id,
+                        outer_pts
+                    ));
+                }
+                continue;
+            }
+
             let mut coords: Vec<f64> = Vec::new();
             let mut hole_starts: Vec<usize> = Vec::new();
 
-            append_contour(&mut coords, &mut out_verts, &group.outer);
+            let sanitized_outer = sanitize_ring_for_earcut(&group.outer);
+            if sanitized_outer.len() < 3 {
+                runlog::warn_line(&format!(
+                    "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_ring",
+                    shape_id,
+                    group_pts,
+                    holes,
+                    outer_pts
+                ));
+                runlog::stage(
+                    &format!(
+                        "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_ring",
+                        shape_id,
+                        group_pts,
+                        holes,
+                        outer_pts
+                    ),
+                    0,
+                );
+                return Err(TessError::EarcutDenied);
+            }
+
+            let mut sanitized_holes: Vec<Vec<Point>> = Vec::with_capacity(group.holes.len());
             for h in &group.holes {
+                let sanitized = sanitize_ring_for_earcut(h);
+                if sanitized.len() < 3 {
+                    runlog::warn_line(&format!(
+                        "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_ring",
+                        shape_id,
+                        group_pts,
+                        holes,
+                        outer_pts
+                    ));
+                    runlog::stage(
+                        &format!(
+                            "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_ring",
+                            shape_id,
+                            group_pts,
+                            holes,
+                            outer_pts
+                        ),
+                        0,
+                    );
+                    return Err(TessError::EarcutDenied);
+                }
+                sanitized_holes.push(sanitized);
+            }
+
+            let (group_pts, outer_pts, _hole_pts) = {
+                let hole_pts: usize = sanitized_holes.iter().map(|hole| hole.len()).sum();
+                let total_pts = sanitized_outer.len() + hole_pts;
+                (total_pts, sanitized_outer.len(), hole_pts)
+            };
+            let holes = sanitized_holes.len();
+
+            let area = polygon_area_signed_f64(&sanitized_outer).abs();
+            if area < 0.5 {
+                runlog::warn_line(&format!(
+                    "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_area",
+                    shape_id,
+                    group_pts,
+                    holes,
+                    outer_pts
+                ));
+                runlog::stage(
+                    &format!(
+                        "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason=degenerate_area",
+                        shape_id,
+                        group_pts,
+                        holes,
+                        outer_pts
+                    ),
+                    0,
+                );
+                return Err(TessError::EarcutDenied);
+            }
+
+            if let Err(reason) = earcut_allowed(group_pts, outer_pts, holes) {
+                runlog::warn_line(&format!(
+                    "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason={}",
+                    shape_id,
+                    group_pts,
+                    holes,
+                    outer_pts,
+                    reason
+                ));
+                runlog::stage(
+                    &format!(
+                        "earcut_skip shape={} total_pts={} holes={} outer_pts={} reason={}",
+                        shape_id,
+                        group_pts,
+                        holes,
+                        outer_pts,
+                        reason
+                    ),
+                    0,
+                );
+                return Err(TessError::EarcutDenied);
+            }
+
+            append_contour(&mut coords, &mut out_verts, &sanitized_outer);
+            for h in &sanitized_holes {
                 hole_starts.push(out_verts.len() - base);
                 append_contour(&mut coords, &mut out_verts, h);
             }
@@ -345,10 +490,34 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                 return Err(TessError::TooManyVerts);
             }
             if fill_start.elapsed().as_millis() as u64 > FILL_PATH_BUDGET_MS {
+                let (group_pts, outer_pts, _hole_pts) = group_point_counts(&group);
+                runlog::log_important(&format!(
+                    "earcut_skip timeout shape={} total_pts={} holes={} outer_pts={}",
+                    shape_id,
+                    group_pts,
+                    group.holes.len(),
+                    outer_pts
+                ));
                 timed_out = true;
                 break;
             }
 
+            runlog::stage(
+                &format!(
+                    "earcut_input shape={} pts={} holes={}",
+                    shape_id,
+                    group_pts,
+                    holes
+                ),
+                0,
+            );
+            runlog::log_important(&format!(
+                "earcut_input shape={} total_pts={} holes={} outer_pts={}",
+                shape_id,
+                group_pts,
+                holes,
+                outer_pts
+            ));
             let idx = earcut(&coords, &hole_starts, 2).map_err(|_| {
                 runlog::warn_line(&format!(
                     "tessellate_fills earcut_failed shape={} verts={} holes={} paths={}",
@@ -359,6 +528,11 @@ pub fn tessellate_fills(shape: &DistilledShape<'_>, shape_id: u32) -> Result<Tes
                 ));
                 TessError::EarcutFailed
             })?;
+            runlog::log_important(&format!(
+                "earcut_done shape={} tris={}",
+                shape_id,
+                idx.len() / 3
+            ));
             if idx.len() < 3 || idx.len() % 3 != 0 {
                 runlog::warn_line(&format!(
                     "tessellate_fills earcut_invalid shape={} tris={} paths={}",
@@ -974,6 +1148,120 @@ struct ContourGroup {
     holes: Vec<Vec<(f32, f32)>>,
 }
 
+fn group_point_counts(group: &ContourGroup) -> (usize, usize, usize) {
+    let outer_pts = group.outer.len();
+    let hole_pts: usize = group.holes.iter().map(|hole| hole.len()).sum();
+    let total_pts = outer_pts + hole_pts;
+    (total_pts, outer_pts, hole_pts)
+}
+
+fn sanitize_ring_for_earcut(ring: &[Point]) -> Vec<Point> {
+    if ring.is_empty() {
+        return Vec::new();
+    }
+
+    let mut n = ring.len();
+    let first = ring[0];
+    let last = ring[n - 1];
+    if (first.0 - last.0).abs() < 0.01 && (first.1 - last.1).abs() < 0.01 {
+        n = n.saturating_sub(1);
+    }
+
+    let mut out: Vec<Point> = Vec::with_capacity(n);
+    let mut prev_px: Option<(i32, i32)> = None;
+    for &(x, y) in ring.iter().take(n) {
+        let px = x.round() as i32;
+        let py = y.round() as i32;
+        if let Some((prev_x, prev_y)) = prev_px {
+            if prev_x == px && prev_y == py {
+                continue;
+            }
+        }
+        out.push((x, y));
+        prev_px = Some((px, py));
+    }
+
+    if out.len() >= 2 {
+        let first_px = (out[0].0.round() as i32, out[0].1.round() as i32);
+        let last_px = (out[out.len() - 1].0.round() as i32, out[out.len() - 1].1.round() as i32);
+        if first_px == last_px {
+            out.pop();
+        }
+    }
+
+    out
+}
+
+fn is_convex_ring(ring: &[Point], max_pts: usize) -> bool {
+    let mut n = ring.len();
+    if n < 3 {
+        return false;
+    }
+    let first = ring[0];
+    let last = ring[n - 1];
+    if (first.0 - last.0).abs() < 0.01 && (first.1 - last.1).abs() < 0.01 {
+        n = n.saturating_sub(1);
+    }
+    if n < 3 || n > max_pts {
+        return false;
+    }
+
+    let mut sign = 0.0f32;
+    let eps = 1.0e-4f32;
+    for i in 0..n {
+        let prev = ring[(i + n - 1) % n];
+        let curr = ring[i];
+        let next = ring[(i + 1) % n];
+        let cross = (curr.0 - prev.0) * (next.1 - curr.1) - (curr.1 - prev.1) * (next.0 - curr.0);
+        if cross.abs() <= eps {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross;
+        } else if sign * cross < 0.0 {
+            return false;
+        }
+    }
+    sign != 0.0
+}
+
+fn triangulate_convex_fan(base: usize, ring_len: usize, out_indices: &mut Vec<u16>) {
+    if ring_len < 3 {
+        return;
+    }
+    for i in 1..(ring_len - 1) {
+        out_indices.push(base as u16);
+        out_indices.push((base + i) as u16);
+        out_indices.push((base + i + 1) as u16);
+    }
+}
+
+#[inline(always)]
+fn polygon_area_signed_f64(poly: &[Point]) -> f64 {
+    let mut a = 0.0f64;
+    let mut j = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (xj, yj) = poly[j];
+        let (xi, yi) = poly[i];
+        a += (xj as f64 * yi as f64) - (xi as f64 * yj as f64);
+        j = i;
+    }
+    0.5 * a
+}
+
+fn earcut_allowed(total_pts: usize, outer_pts: usize, holes: usize) -> Result<(), &'static str> {
+    if total_pts > EARCUT_MAX_TOTAL_POINTS {
+        return Err("total_points");
+    }
+    if outer_pts > EARCUT_MAX_OUTER_POINTS {
+        return Err("outer_points");
+    }
+    if holes > EARCUT_MAX_HOLES {
+        return Err("holes");
+    }
+    Ok(())
+}
+
 enum GroupContoursResult {
     Groups(Vec<ContourGroup>),
     CapTests,
@@ -1237,7 +1525,7 @@ fn polygon_area_abs(poly: &[(f32, f32)]) -> f32 {
     polygon_area_signed(poly).abs()
 }
 
-fn append_contour(coords: &mut Vec<f64>, out_verts: &mut Vec<Vertex2>, contour: &[(f32, f32)]) {
+fn append_contour(coords: &mut Vec<f64>, out_verts: &mut Vec<Vertex2>, contour: &[Point]) {
     // Drop the duplicated closing vertex if present, because earcut expects simple rings.
     let mut n = contour.len();
     if n >= 2 {
@@ -1252,4 +1540,19 @@ fn append_contour(coords: &mut Vec<f64>, out_verts: &mut Vec<Vertex2>, contour: 
         coords.push(y as f64);
         out_verts.push(Vertex2 { x: x.round() as i32, y: y.round() as i32 });
     }
+}
+
+fn append_contour_vertices(out_verts: &mut Vec<Vertex2>, contour: &[Point]) -> usize {
+    let mut n = contour.len();
+    if n >= 2 {
+        let first = contour[0];
+        let last = contour[n - 1];
+        if (first.0 - last.0).abs() < 0.01 && (first.1 - last.1).abs() < 0.01 {
+            n -= 1;
+        }
+    }
+    for &(x, y) in contour.iter().take(n) {
+        out_verts.push(Vertex2 { x: x.round() as i32, y: y.round() as i32 });
+    }
+    n
 }
