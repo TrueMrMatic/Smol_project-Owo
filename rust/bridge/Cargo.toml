@@ -10,11 +10,12 @@ crate-type = ["staticlib"]
 # Bisect plan: build with e.g. `--no-default-features --features navigator` or
 # `--no-default-features --features storage` to isolate TLS-heavy subsystems.
 # Default keeps current behavior.
-default = ["navigator", "sockets", "storage", "async_tasks"]
-navigator = []
-sockets = ["navigator"]
+default = []
+runlog = []
+legacy_sw_render = []
+net = ["async-channel", "indexmap"]
 storage = []
-async_tasks = []
+video = []
 
 [dependencies]
 # Ruffle crates
@@ -24,16 +25,16 @@ async_tasks = []
 # Pinning stabilizes development and lets us progressively replace Debug-based parsing with real
 # command inspection.
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", tag = "nightly-2025-12-27", default-features = false }
-ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", tag = "nightly-2025-12-27" }
-ruffle_video = { git = "https://github.com/ruffle-rs/ruffle", tag = "nightly-2025-12-27" }
+ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", tag = "nightly-2025-12-27", default-features = false }
+ruffle_video = { git = "https://github.com/ruffle-rs/ruffle", tag = "nightly-2025-12-27", default-features = false }
 
 # Used at shape registration time to triangulate polygons-with-holes (fills only).
 earcutr = "0.4"
 
 # Dependencies for the Backend
 url = "2.5"
-indexmap = "2.2"
-async-channel = "2.3"
+indexmap = { version = "2.2", optional = true }
+async-channel = { version = "2.3", optional = true }
 log = "0.4"
 encoding_rs = "0.8"
 
