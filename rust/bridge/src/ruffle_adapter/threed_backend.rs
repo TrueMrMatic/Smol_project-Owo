@@ -646,7 +646,12 @@ impl RenderBackend for ThreeDSBackend {
                 return self.shape_timeout_fallback(key, id, bounds, elapsed_ms, "post_strokes", &handle_impl);
             }
 
-            let (fill_count, stroke_count, fill_tris, stroke_tris) = if runlog::is_verbose() {
+            let (fill_count, stroke_count, fill_tris, stroke_tris): (
+                Option<u32>,
+                Option<u32>,
+                Option<u32>,
+                Option<u32>,
+            ) = if runlog::is_verbose() {
                 let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum::<u32>();
                 let stroke_tris: u32 = if skip_strokes {
                     0
@@ -687,10 +692,10 @@ impl RenderBackend for ThreeDSBackend {
                     bounds.y,
                     bounds.w,
                     bounds.h,
-                    fill_count.unwrap_or(0),
-                    fill_tris.unwrap_or(0),
-                    stroke_count.unwrap_or(0),
-                    stroke_tris.unwrap_or(0),
+                    fill_count.unwrap_or(0u32),
+                    fill_tris.unwrap_or(0u32),
+                    stroke_count.unwrap_or(0u32),
+                    stroke_tris.unwrap_or(0u32),
                     fill_failed,
                     fill_partial,
                     stroke_failed,
@@ -710,10 +715,10 @@ impl RenderBackend for ThreeDSBackend {
                     bounds.h,
                     fills_ms,
                     strokes_ms,
-                    fill_count.unwrap_or(0),
-                    fill_tris.unwrap_or(0),
-                    stroke_count.unwrap_or(0),
-                    stroke_tris.unwrap_or(0)
+                    fill_count.unwrap_or(0u32),
+                    fill_tris.unwrap_or(0u32),
+                    stroke_count.unwrap_or(0u32),
+                    stroke_tris.unwrap_or(0u32)
                 ));
             }
 
