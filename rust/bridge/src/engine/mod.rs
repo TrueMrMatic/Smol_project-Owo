@@ -1,10 +1,12 @@
 use std::sync::{Arc, Mutex};
 
-use ruffle_core::{Player, PlayerBuilder};
+use ruffle_core::{Player, PlayerBuilder, PlayerEvent};
+use ruffle_core::events::{KeyDescriptor, KeyLocation, LogicalKey, MouseButton, NamedKey, PhysicalKey};
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::Color;
 
 use ruffle_core::backend::audio::NullAudioBackend;
+#[cfg(feature = "video")]
 use ruffle_video::null::NullVideoBackend;
 
 use crate::ffi::fileio::read_file_bytes;
@@ -29,10 +31,12 @@ pub struct Engine {
     frame_counter: u64,
     last_heartbeat_ms: u64,
     pending_snapshot: Option<String>,
+    mouse_x: i32,
+    mouse_y: i32,
 }
 
 impl Engine {
-    pub fn new(root_path_in: &str) -> Result<Self, String> {
+    pub fn new(root_path_in: &str, screen_w: u32, screen_h: u32) -> Result<Self, String> {
         let root_path = root_path_in.to_string();
         let root_file_url = format!("file:///{}", root_path);
 
@@ -50,17 +54,18 @@ impl Engine {
         let backend = ThreeDSBackend::new(caches.clone());
 
         runlog::log_important("init: player_builder");
-        let mut builder = PlayerBuilder::new();
+        let mut builder = PlayerBuilder::new()
+            .with_viewport_dimensions(screen_w, screen_h, 1.0);
         runlog::log_important("init: renderer backend");
         builder = builder.with_renderer(backend.clone());
         runlog::log_important("init: audio backend");
         builder = builder.with_audio(NullAudioBackend::new());
-        #[cfg(feature = "navigator")]
+        #[cfg(feature = "net")]
         {
             runlog::log_important("init: navigator backend");
             builder = builder.with_navigator(backend.clone());
         }
-        #[cfg(not(feature = "navigator"))]
+        #[cfg(not(feature = "net"))]
         {
             runlog::log_important("init: navigator backend disabled");
         }
@@ -73,8 +78,11 @@ impl Engine {
         {
             runlog::log_important("init: storage backend disabled");
         }
-        runlog::log_important("init: video backend");
-        builder = builder.with_video(NullVideoBackend::new());
+        #[cfg(feature = "video")]
+        {
+            runlog::log_important("init: video backend");
+            builder = builder.with_video(NullVideoBackend::new());
+        }
         runlog::log_important("init: log backend");
         builder = builder.with_log(backend.clone());
         runlog::log_important("init: ui backend");
@@ -83,6 +91,12 @@ impl Engine {
         // Load SWF.
         match SwfMovie::from_data(&movie_bytes, root_file_url.clone(), None) {
             Ok(movie) => {
+                if movie.is_action_script_3() {
+                    let msg = "AS3 not supported yet (AS2 only).";
+                    backend.set_fatal_error(msg.to_string());
+                    runlog::warn_line(msg);
+                    return Err(msg.to_string());
+                }
                 backend.mark_movie_loaded(movie.version());
                 runlog::log_important(&format!("Engine::new SwfMovie ok version={}", movie.version()));
                 player.lock().unwrap().mutate_with_update_context(|uc| {
@@ -107,13 +121,15 @@ impl Engine {
             frame_counter: 0,
             last_heartbeat_ms: 0,
             pending_snapshot: None,
+            mouse_x: 0,
+            mouse_y: 0,
         })
     }
 
     /// Tick Ruffle and render the latest submitted frame to the top framebuffer.
     ///
     /// This keeps the existing C-side loop unchanged: C calls `bridge_tick`, then swaps buffers.
-    pub fn tick_and_render(&mut self) {
+    pub fn tick_and_render(&mut self, dt_ms: u32) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
         runlog::tick();
         if runlog::is_verbose() {
@@ -135,10 +151,11 @@ impl Engine {
         // Poll any async-ish tasks queued by Ruffle backends.
         self.backend.poll_tasks();
 
-        // 60 Hz fixed step for now.
+        // Tick using the provided delta (fallback to ~60Hz).
         {
             let mut player = self.player.lock().unwrap();
-            player.tick(1.0 / 60.0);
+            let dt = if dt_ms == 0 { 1.0 / 60.0 } else { (dt_ms as f64) / 1000.0 };
+            player.tick(dt);
         }
 
         // Determine desired clear color.
@@ -219,8 +236,76 @@ impl Engine {
         self.backend.is_ready()
     }
 
+    pub fn mouse_move(&mut self, x: i32, y: i32) {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.backend.record_input(format!("M{:03},{:03}", x, y));
+        let mut player = self.player.lock().unwrap();
+        player.handle_event(PlayerEvent::MouseMove { x: x as f64, y: y as f64 });
+    }
+
+    pub fn mouse_button(&mut self, button: i32, down: bool) {
+        let btn = match button {
+            1 => MouseButton::Right,
+            2 => MouseButton::Middle,
+            _ => MouseButton::Left,
+        };
+        let mut player = self.player.lock().unwrap();
+        if down {
+            self.backend.record_input(format!("MB{} {}", button, "D"));
+            player.handle_event(PlayerEvent::MouseDown {
+                x: self.mouse_x as f64,
+                y: self.mouse_y as f64,
+                button: btn,
+                index: None,
+            });
+        } else {
+            self.backend.record_input(format!("MB{} {}", button, "U"));
+            player.handle_event(PlayerEvent::MouseUp {
+                x: self.mouse_x as f64,
+                y: self.mouse_y as f64,
+                button: btn,
+            });
+        }
+    }
+
+    pub fn key_event(&mut self, keycode: i32, down: bool) {
+        if let Some(desc) = key_descriptor_from_keycode(keycode) {
+            self.backend.record_input(format!("K{} {}", if down { "D" } else { "U" }, keycode));
+            let mut player = self.player.lock().unwrap();
+            let event = if down {
+                PlayerEvent::KeyDown { key: desc }
+            } else {
+                PlayerEvent::KeyUp { key: desc }
+            };
+            player.handle_event(event);
+        }
+    }
+
     pub fn status_text(&self) -> String {
         // Keep it short: it will be printed every frame on the bottom screen.
         self.backend.status_text_short()
     }
+}
+
+fn key_descriptor_from_keycode(keycode: i32) -> Option<KeyDescriptor> {
+    let logical = match keycode {
+        8 => LogicalKey::Named(NamedKey::Backspace),
+        13 => LogicalKey::Named(NamedKey::Enter),
+        19 => LogicalKey::Named(NamedKey::Pause),
+        27 => LogicalKey::Named(NamedKey::Escape),
+        32 => LogicalKey::Character(' '),
+        37 => LogicalKey::Named(NamedKey::ArrowLeft),
+        38 => LogicalKey::Named(NamedKey::ArrowUp),
+        39 => LogicalKey::Named(NamedKey::ArrowRight),
+        40 => LogicalKey::Named(NamedKey::ArrowDown),
+        48..=57 => LogicalKey::Character(char::from_u32(keycode as u32)?),
+        65..=90 => LogicalKey::Character(char::from_u32(keycode as u32)?.to_ascii_lowercase()),
+        _ => return None,
+    };
+    Some(KeyDescriptor {
+        physical_key: PhysicalKey::Unknown,
+        logical_key: logical,
+        key_location: KeyLocation::Standard,
+    })
 }

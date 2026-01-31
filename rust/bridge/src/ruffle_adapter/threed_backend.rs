@@ -1,24 +1,30 @@
 use std::borrow::Cow;
+#[cfg(feature = "net")]
 use std::future::Future;
+#[cfg(feature = "net")]
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "net")]
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::time::{Duration, Instant};
+#[cfg(feature = "net")]
+use std::time::Duration;
+use std::time::Instant;
 
-#[cfg(feature = "navigator")]
+#[cfg(feature = "net")]
 use async_channel::{Receiver, Sender};
+#[cfg(feature = "net")]
 use indexmap::IndexMap;
 use url::Url;
 
 use ruffle_core::backend::log::LogBackend;
-#[cfg(feature = "navigator")]
+#[cfg(feature = "net")]
 use ruffle_core::backend::navigator::{NavigatorBackend, NavigationMethod, Request, SuccessResponse, ErrorResponse};
 #[cfg(feature = "storage")]
 use ruffle_core::backend::storage::StorageBackend;
 use ruffle_core::backend::ui::{UiBackend, MouseCursor, FileFilter, FileDialogResult, FontDefinition, LanguageIdentifier, DialogLoaderError};
 use ruffle_core::font::FontQuery;
-#[cfg(feature = "navigator")]
+#[cfg(feature = "net")]
 use ruffle_core::socket::{SocketAction, SocketHandle};
 use ruffle_core::Color;
 
@@ -43,6 +49,11 @@ use ruffle_core::swf::ColorTransform as SwfColorTransform;
 use super::tessellate;
 use crate::runlog;
 type ShapeKey = usize;
+
+fn shape_handle_from_impl<T: ShapeHandleImpl + 'static>(handle: Arc<T>) -> ShapeHandle {
+    let handle: Arc<dyn ShapeHandleImpl> = handle;
+    ShapeHandle(handle)
+}
 
 const MAX_TRIS_PER_FRAME: u32 = 8000;
 const MAX_UNSUPPORTED_FILL_WARNINGS: u32 = 8;
@@ -152,7 +163,7 @@ fn bitmap_to_surface(bitmap: Bitmap) -> BitmapSurface {
     BitmapSurface { width, height, rgba, is_opaque }
 }
 
-#[cfg(feature = "async_tasks")]
+#[cfg(feature = "net")]
 type BoxedFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
 #[derive(Default, Clone)]
@@ -176,6 +187,8 @@ struct Diagnostics {
     total_unsupported_fill_paints: u32,
     last_warning: Option<String>,
     last_fatal: Option<String>,
+    last_input: Option<String>,
+    input_counter: u64,
 }
 
 struct SharedState {
@@ -206,7 +219,7 @@ impl SharedState {
 
 #[derive(Clone)]
 pub struct ThreeDSBackend {
-    #[cfg(feature = "async_tasks")]
+    #[cfg(feature = "net")]
     tasks: Arc<Mutex<Vec<BoxedFuture>>>,
     shared: Arc<Mutex<SharedState>>,
     next_shape_id: Arc<AtomicU32>,
@@ -217,7 +230,7 @@ pub struct ThreeDSBackend {
 impl ThreeDSBackend {
     pub fn new(caches: SharedCaches) -> Self {
         Self {
-            #[cfg(feature = "async_tasks")]
+            #[cfg(feature = "net")]
             tasks: Arc::new(Mutex::new(Vec::new())),
             shared: Arc::new(Mutex::new(SharedState::new())),
             next_shape_id: Arc::new(AtomicU32::new(1)),
@@ -227,7 +240,7 @@ impl ThreeDSBackend {
     }
 
     pub fn poll_tasks(&self) {
-        #[cfg(feature = "async_tasks")]
+        #[cfg(feature = "net")]
         {
         let waker = unsafe { Waker::from_raw(dummy_waker()) };
         let mut cx = Context::from_waker(&waker);
@@ -252,6 +265,12 @@ impl ThreeDSBackend {
         let mut s = self.shared.lock().unwrap();
         s.submit_called = false;
         s.diagnostics.last_warning = None;
+    }
+
+    pub fn record_input(&self, text: String) {
+        let mut s = self.shared.lock().unwrap();
+        s.diagnostics.last_input = Some(text);
+        s.diagnostics.input_counter = s.diagnostics.input_counter.wrapping_add(1);
     }
 
     /// Move the latest frame into `dst` without allocating.
@@ -317,7 +336,7 @@ impl ThreeDSBackend {
         s.diagnostics.total_tess_ms_fills = s.diagnostics.total_tess_ms_fills.saturating_add(elapsed_ms);
         s.diagnostics.total_tess_ms_strokes = s.diagnostics.total_tess_ms_strokes.saturating_add(0);
         s.diagnostics.max_tess_ms_single_shape = s.diagnostics.max_tess_ms_single_shape.max(elapsed_ms);
-        ShapeHandle(Arc::clone(handle_impl))
+        shape_handle_from_impl(Arc::clone(handle_impl))
     }
 
 
@@ -349,6 +368,9 @@ impl ThreeDSBackend {
             s.diagnostics.last_cmds_shapes,
             s.diagnostics.last_cmds_bitmaps,
         );
+        if let Some(input) = &s.diagnostics.last_input {
+            line = format!("{} I:{}", line, trim_to(input, 9));
+        }
         if let Some(warn) = &s.diagnostics.last_warning {
             // Prefix warnings so the C HUD can show them on a dedicated line above the main HUD.
             line = format!("!{} {}", trim_to(warn, 10), line);
@@ -565,7 +587,7 @@ impl RenderBackend for ThreeDSBackend {
 
             let mut s = self.shared.lock().unwrap();
             s.diagnostics.shapes_registered = s.diagnostics.shapes_registered.saturating_add(1);
-            ShapeHandle(handle_impl)
+            shape_handle_from_impl(handle_impl)
         } else {
             // Step 2A: tessellate fills once at registration time and cache the meshes.
             //
@@ -604,7 +626,7 @@ impl RenderBackend for ThreeDSBackend {
             if elapsed_ms > SHAPE_WATCHDOG_MS {
                 return self.shape_timeout_fallback(key, id, bounds, elapsed_ms, "post_fills", &handle_impl);
             }
-            let skip_strokes = shape.line_styles.is_empty();
+            let skip_strokes = !shape.paths.iter().any(|path| matches!(path, DrawPath::Stroke { .. }));
             let (strokes, stroke_failed, stroke_partial, strokes_ms) = if skip_strokes {
                 (Vec::new(), false, false, 0)
             } else {
@@ -627,20 +649,23 @@ impl RenderBackend for ThreeDSBackend {
             }
 
             let (fill_count, stroke_count, fill_tris, stroke_tris) = if runlog::is_verbose() {
-                let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
+                let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum::<u32>();
                 let stroke_tris: u32 = if skip_strokes {
                     0
                 } else {
-                    strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum()
+                    strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum::<u32>()
                 };
-                (
-                    Some(fills.len()),
-                    Some(strokes.len()),
-                    Some(fill_tris),
-                    Some(stroke_tris),
-                )
+                let fill_count: Option<u32> = Some(fills.len() as u32);
+                let stroke_count: Option<u32> = Some(strokes.len() as u32);
+                let fill_tris: Option<u32> = Some(fill_tris);
+                let stroke_tris: Option<u32> = Some(stroke_tris);
+                (fill_count, stroke_count, fill_tris, stroke_tris)
             } else {
-                (None, None, None, None)
+                let fill_count: Option<u32> = None;
+                let stroke_count: Option<u32> = None;
+                let fill_tris: Option<u32> = None;
+                let stroke_tris: Option<u32> = None;
+                (fill_count, stroke_count, fill_tris, stroke_tris)
             };
 
             self.caches.shapes.lock().unwrap().insert_meshes(
@@ -726,7 +751,7 @@ impl RenderBackend for ThreeDSBackend {
                 .diagnostics
                 .total_unsupported_fill_paints
                 .saturating_add(unsupported_fill_paints);
-            ShapeHandle(handle_impl)
+            shape_handle_from_impl(handle_impl)
         }
     }
 
@@ -1123,7 +1148,7 @@ impl RenderBackend for ThreeDSBackend {
 }
 
 
-#[cfg(feature = "navigator")]
+#[cfg(feature = "net")]
 impl NavigatorBackend for ThreeDSBackend {
     fn navigate_to_url(&self, _url: &str, _target: &str, _vars: Option<(NavigationMethod, IndexMap<String, String>)>) {}
 
@@ -1141,27 +1166,16 @@ impl NavigatorBackend for ThreeDSBackend {
     }
 
     fn spawn_future(&mut self, future: Pin<Box<dyn Future<Output = Result<(), DialogLoaderError>>>>) {
-        #[cfg(feature = "async_tasks")]
-        {
         let mut tasks = self.tasks.lock().unwrap();
         tasks.push(Box::pin(async move {
             let _ = future.await;
         }));
-        }
-        #[cfg(not(feature = "async_tasks"))]
-        {
-            let _ = future;
-            runlog::warn_line("navigator spawn_future ignored (async_tasks disabled)");
-        }
     }
 
     fn pre_process_url(&self, url: Url) -> Url { url }
 
     fn connect_socket(&mut self, _host: String, _port: u16, _timeout: Duration, _handle: SocketHandle, _receiver: Receiver<Vec<u8>>, _sender: Sender<SocketAction>) {
-        #[cfg(not(feature = "sockets"))]
-        {
-            runlog::warn_line("navigator connect_socket ignored (sockets disabled)");
-        }
+        runlog::warn_line("navigator connect_socket unimplemented");
     }
 }
 
@@ -1211,11 +1225,16 @@ fn trim_to(s: &str, n: usize) -> &str {
     &s[..n]
 }
 
+#[cfg(feature = "net")]
 unsafe fn dummy_waker_clone(_: *const ()) -> RawWaker { dummy_waker() }
+#[cfg(feature = "net")]
 unsafe fn dummy_waker_wake(_: *const ()) {}
+#[cfg(feature = "net")]
 unsafe fn dummy_waker_wake_by_ref(_: *const ()) {}
+#[cfg(feature = "net")]
 unsafe fn dummy_waker_drop(_: *const ()) {}
 
+#[cfg(feature = "net")]
 const VTABLE: RawWakerVTable = RawWakerVTable::new(
     dummy_waker_clone,
     dummy_waker_wake,
@@ -1223,6 +1242,7 @@ const VTABLE: RawWakerVTable = RawWakerVTable::new(
     dummy_waker_drop,
 );
 
+#[cfg(feature = "net")]
 fn dummy_waker() -> RawWaker {
     RawWaker::new(std::ptr::null(), &VTABLE)
 }

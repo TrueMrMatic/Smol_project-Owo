@@ -1,28 +1,14 @@
 #include <3ds.h>
+#include <errno.h>
+#include <citro3d.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include <3ds/services/ps.h>
 
+#include "bridge.h"
 #include "file_selector.h"
-
-// Rust exports
-void* bridge_player_create_with_url(const char* url);
-void  bridge_tick(void* ctx);
-void  bridge_player_destroy(void* ctx);
-
-// Run bundle / protocol helpers (exported by Rust)
-void  bridge_write_status_snapshot_ctx(void* ctx);
-
-// Renderer controls (exported by Rust)
-u32   bridge_runlog_drain(char* out, u32 out_len);
-void   bridge_print_status(void* ctx);
-void   bridge_request_command_dump_ctx(void* ctx);
-void   bridge_toggle_wireframe_once_ctx(void* ctx);
-void   bridge_set_wireframe_hold_ctx(void* ctx, int enabled);
-uint32_t bridge_toggle_affine_debug_overlay_ctx(void* ctx);
-uint32_t bridge_renderer_ready_ctx(void* ctx);
-size_t bridge_get_status_text(void* ctx, char* out, size_t cap);
+#include "gpu_test_renderer.h"
 
 static void clear_top_black_double(void) {
     // Clear BOTH top-screen buffers to avoid flicker when the selector swaps buffers.
@@ -50,6 +36,16 @@ static void clear_top_black_double(void) {
 #define UI_ROW_WARN 29
 #define UI_ROW_HUD 30
 
+#define KEYCODE_BACKSPACE 8
+#define KEYCODE_ENTER 13
+#define KEYCODE_PAUSE 19
+#define KEYCODE_ESCAPE 27
+#define KEYCODE_SPACE 32
+#define KEYCODE_LEFT 37
+#define KEYCODE_UP 38
+#define KEYCODE_RIGHT 39
+#define KEYCODE_DOWN 40
+
 static const char* path_basename(const char* path) {
     const char* last = path;
     for (const char* p = path; *p; ++p) {
@@ -73,8 +69,8 @@ static void ui_draw_static(const char* swf_path) {
     printf("\x1b[%d;0H  Y: write diag snapshot", UI_ROW_CONTROLS + 2);
     printf("\x1b[%d;0H  X: dump frame cmds", UI_ROW_CONTROLS + 3);
     printf("\x1b[%d;0H  L+R+X: affine overlay", UI_ROW_CONTROLS + 4);
-    printf("\x1b[%d;0H  B: back", UI_ROW_CONTROLS + 5);
-    printf("\x1b[%d;0H  START: exit app", UI_ROW_CONTROLS + 6);
+    printf("\x1b[%d;0H  A: click  B: esc", UI_ROW_CONTROLS + 5);
+    printf("\x1b[%d;0H  START: pause  SELECT: back", UI_ROW_CONTROLS + 6);
     printf("\x1b[%d;0HLogs:", UI_ROW_LOG_LABEL);
     ui_clear_log_window();
 }
@@ -253,6 +249,9 @@ int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
 
     gfxInitDefault();
+    C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
+    psInit();
+    gpu_test_renderer_init();
 
     // Bottom console only: keep TOP screen free for graphics.
     PrintConsole conBot;
@@ -280,25 +279,40 @@ int main(int argc, char* argv[]) {
         printf("Selected: %s\n", swf_path);
         printf("Initializing Ruffle...\n");
 
-        void* ctx = bridge_player_create_with_url(swf_path);
+        const int screen_w = 400;
+        const int screen_h = 240;
+        bridge_engine_t ctx = bridge_engine_create(swf_path, screen_w, screen_h);
+        if (!ctx) {
+            char err[128] = {0};
+            bridge_engine_last_error(err, sizeof(err));
+            consoleClear();
+            printf("Load failed:\n%s\n\nPress B to return.\n", err);
+            while (aptMainLoop()) {
+                hidScanInput();
+                if (hidKeysDown() & KEY_START) goto exit_app;
+                if (hidKeysDown() & KEY_B) break;
+                gspWaitForVBlank();
+            }
+            clear_top_black_double();
+            continue;
+        }
 
         ui_reset_log_state();
         ui_draw_static(swf_path);
 
         // Playback loop
+        bool touch_down = false;
+        bool pause_overlay = false;
+        u64 last_frame_ms = osGetTime();
         while (aptMainLoop()) {
             hidScanInput();
             u32 down = hidKeysDown();
             u32 held = hidKeysHeld();
+            u32 up = hidKeysUp();
 
-            if (down & KEY_START) {
-                bridge_player_destroy(ctx);
-                goto exit_app;
-            }
-
-            if (down & KEY_B) {
+            if (down & KEY_SELECT) {
                 // Back to file selector
-                bridge_player_destroy(ctx);
+                bridge_engine_destroy(ctx);
                 clear_top_black_double();
                 break;
             }
@@ -326,8 +340,52 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            if (down & KEY_START) {
+                pause_overlay = !pause_overlay;
+                ui_set_notice(pause_overlay ? "pause overlay on" : "pause overlay off", 60);
+                bridge_engine_key(ctx, KEYCODE_PAUSE, true);
+            }
+            if (up & KEY_START) {
+                bridge_engine_key(ctx, KEYCODE_PAUSE, false);
+            }
+
+            if (down & KEY_DUP) bridge_engine_key(ctx, KEYCODE_UP, true);
+            if (down & KEY_DDOWN) bridge_engine_key(ctx, KEYCODE_DOWN, true);
+            if (down & KEY_DLEFT) bridge_engine_key(ctx, KEYCODE_LEFT, true);
+            if (down & KEY_DRIGHT) bridge_engine_key(ctx, KEYCODE_RIGHT, true);
+
+            if (up & KEY_DUP) bridge_engine_key(ctx, KEYCODE_UP, false);
+            if (up & KEY_DDOWN) bridge_engine_key(ctx, KEYCODE_DOWN, false);
+            if (up & KEY_DLEFT) bridge_engine_key(ctx, KEYCODE_LEFT, false);
+            if (up & KEY_DRIGHT) bridge_engine_key(ctx, KEYCODE_RIGHT, false);
+
+            if (down & KEY_B) bridge_engine_key(ctx, KEYCODE_ESCAPE, true);
+            if (up & KEY_B) bridge_engine_key(ctx, KEYCODE_ESCAPE, false);
+
+            if (down & KEY_A) bridge_engine_mouse_button(ctx, 0, true);
+            if (up & KEY_A) bridge_engine_mouse_button(ctx, 0, false);
+
+            if (held & KEY_TOUCH) {
+                touchPosition touch;
+                hidTouchRead(&touch);
+                int x = (touch.px * screen_w) / 320;
+                int y = (touch.py * screen_h) / 240;
+                bridge_engine_mouse_move(ctx, x, y);
+                if (!touch_down) {
+                    bridge_engine_mouse_button(ctx, 0, true);
+                    touch_down = true;
+                }
+            } else if (touch_down) {
+                bridge_engine_mouse_button(ctx, 0, false);
+                touch_down = false;
+            }
+
+            u64 now_ms = osGetTime();
+            u64 dt_ms = now_ms - last_frame_ms;
+            last_frame_ms = now_ms;
+
             // Tick+Render
-            bridge_tick(ctx);
+            bridge_engine_tick(ctx, (uint32_t)dt_ms);
 
             // Drain and display important boottrace lines (rate-limited).
             log_drain_from_rust();
@@ -336,14 +394,15 @@ int main(int argc, char* argv[]) {
             // HUD line (bottom screen)
             hud_draw(ctx);
 
-            // Present the framebuffer we wrote in Rust.
             gfxFlushBuffers();
-            gfxSwapBuffers();
-            gspWaitForVBlank();
+            gpu_test_renderer_draw((float)now_ms * 0.001f);
         }
     }
 
 exit_app:
+    gpu_test_renderer_shutdown();
+    C3D_Fini();
+    psExit();
     gfxExit();
     return 0;
 }
@@ -351,15 +410,16 @@ exit_app:
 #include <sys/types.h>
 
 // Rust (and some crates) require this on some targets for HashMap/random seeding.
-// On a real app, use the 3DS secure RNG (sslc), but this is enough to link.
+// Use the platform RNG; fail loudly if unavailable.
 ssize_t getrandom(void *buf, size_t buflen, unsigned int flags) {
     (void)flags;
-    static bool seeded = false;
-    if (!seeded) { srand((unsigned)time(NULL)); seeded = true; }
-
-    unsigned char *p = (unsigned char *)buf;
-    for (size_t i = 0; i < buflen; i++) {
-        p[i] = rand() & 0xFF;
+    if (!buf || buflen == 0) {
+        return 0;
+    }
+    Result rc = psGetRandomBytes(buf, buflen);
+    if (R_FAILED(rc)) {
+        errno = EIO;
+        return -1;
     }
     return (ssize_t)buflen;
 }
