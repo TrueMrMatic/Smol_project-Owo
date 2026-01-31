@@ -29,7 +29,10 @@ pub fn masks_enabled() -> bool {
 }
 
 fn read_config() -> RenderConfig {
+    #[cfg(feature = "storage")]
     let mut cfg = RenderConfig::default();
+    #[cfg(not(feature = "storage"))]
+    let cfg = RenderConfig::default();
     #[cfg(feature = "storage")]
     {
         let text = match std::fs::read_to_string(CONFIG_PATH) {

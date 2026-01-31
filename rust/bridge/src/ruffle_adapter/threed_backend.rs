@@ -1,8 +1,6 @@
 use std::borrow::Cow;
-#[cfg(feature = "net")]
-use std::future::Future;
-#[cfg(feature = "net")]
-use std::pin::Pin;
+use core::future::Future;
+use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "net")]
