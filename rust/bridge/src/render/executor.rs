@@ -8,7 +8,32 @@ use crate::render::cache::shapes::Vertex2;
 use crate::runlog;
 use crate::util::config;
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
+
+#[cfg(target_has_atomic = "64")]
+use core::sync::atomic::AtomicU64 as CounterAtomic;
+#[cfg(not(target_has_atomic = "64"))]
+use core::sync::atomic::AtomicU32 as CounterAtomic;
+
+#[cfg(target_has_atomic = "64")]
+const fn counter_init(val: u64) -> CounterAtomic {
+    CounterAtomic::new(val)
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+const fn counter_init(val: u64) -> CounterAtomic {
+    CounterAtomic::new(val as u32)
+}
+
+#[cfg(target_has_atomic = "64")]
+fn counter_fetch_add(counter: &CounterAtomic, value: u64) -> u64 {
+    counter.fetch_add(value, Ordering::Relaxed)
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+fn counter_fetch_add(counter: &CounterAtomic, value: u64) -> u64 {
+    counter.fetch_add(value as u32, Ordering::Relaxed) as u64
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlendMode {
@@ -86,7 +111,7 @@ static TEXTURE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static STROKE_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static TEXT_MESH_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static MASK_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
-static FRAME_COUNTER: AtomicU32 = AtomicU32::new(0);
+static FRAME_COUNTER: CounterAtomic = counter_init(0);
 static FILL_DRAW_COUNT: AtomicU32 = AtomicU32::new(0);
 static FILL_FALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
 static TEXT_DRAW_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -220,39 +245,49 @@ impl CommandExecutor {
     fn flush_frame<D: RenderDevice>(&mut self, device: &mut D, bitmaps: &BitmapCache) {
         let mut current: Option<QueuedMesh> = None;
         for entry in self.frame_queue.entries.drain(..) {
+            let QueuedMesh { kind, state, data } = entry;
             if let Some(batch) = current.as_mut() {
-                if batch.kind == entry.kind && batch.state == entry.state {
-                    match (&mut batch.data, entry.data) {
+                if batch.kind == kind && batch.state == state {
+                    match (&mut batch.data, data) {
                         (MeshData::Solid { verts, indices }, MeshData::Solid { verts: next_verts, indices: next_indices }) => {
                             if verts.len() + next_verts.len() > u16::MAX as usize {
                                 Self::submit_batch(device, bitmaps, batch);
-                                *batch = entry;
+                                *batch = QueuedMesh { kind, state, data: MeshData::Solid { verts: next_verts, indices: next_indices } };
                                 continue;
                             }
                             let offset = verts.len() as u16;
                             verts.extend(next_verts);
                             indices.extend(next_indices.into_iter().map(|i| i + offset));
                         }
-                        (MeshData::Textured { verts, indices, .. }, MeshData::Textured { verts: next_verts, indices: next_indices, .. }) => {
+                        (MeshData::Textured { verts, indices, .. }, MeshData::Textured { verts: next_verts, indices: next_indices, color_transform: next_transform }) => {
                             if verts.len() + next_verts.len() > u16::MAX as usize {
                                 Self::submit_batch(device, bitmaps, batch);
-                                *batch = entry;
+                                *batch = QueuedMesh {
+                                    kind,
+                                    state,
+                                    data: MeshData::Textured {
+                                        verts: next_verts,
+                                        indices: next_indices,
+                                        color_transform: next_transform,
+                                    },
+                                };
                                 continue;
                             }
                             let offset = verts.len() as u16;
                             verts.extend(next_verts);
                             indices.extend(next_indices.into_iter().map(|i| i + offset));
+                            let _ = next_transform;
                         }
-                        _ => {
+                        (_, other) => {
                             Self::submit_batch(device, bitmaps, batch);
-                            *batch = entry;
+                            *batch = QueuedMesh { kind, state, data: other };
                         }
                     }
                     continue;
                 }
                 Self::submit_batch(device, bitmaps, batch);
             }
-            current = Some(entry);
+            current = Some(QueuedMesh { kind, state, data });
         }
 
         if let Some(batch) = current.as_ref() {
@@ -802,8 +837,8 @@ impl CommandExecutor {
         LAST_RECT_FASTPATH.store(rect_fastpath, Ordering::Relaxed);
         LAST_BOUNDS_FALLBACKS.store(bounds_fallbacks, Ordering::Relaxed);
 
-        let frame = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-        if runlog::is_verbose() && frame % DRAW_SUMMARY_FRAMES == 0 {
+        let frame = counter_fetch_add(&FRAME_COUNTER, 1).wrapping_add(1);
+        if runlog::is_verbose() && frame % (DRAW_SUMMARY_FRAMES as u64) == 0 {
             let fill_draws = FILL_DRAW_COUNT.swap(0, Ordering::Relaxed);
             let fill_fallbacks = FILL_FALLBACK_COUNT.swap(0, Ordering::Relaxed);
             let text_draws = TEXT_DRAW_COUNT.swap(0, Ordering::Relaxed);

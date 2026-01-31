@@ -1,10 +1,15 @@
 use std::borrow::Cow;
+#[cfg(feature = "net")]
 use std::future::Future;
+#[cfg(feature = "net")]
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "net")]
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::time::{Duration, Instant};
+#[cfg(feature = "net")]
+use std::time::Duration;
+use std::time::Instant;
 
 #[cfg(feature = "net")]
 use async_channel::{Receiver, Sender};
@@ -44,6 +49,11 @@ use ruffle_core::swf::ColorTransform as SwfColorTransform;
 use super::tessellate;
 use crate::runlog;
 type ShapeKey = usize;
+
+fn shape_handle_from_impl<T: ShapeHandleImpl + 'static>(handle: Arc<T>) -> ShapeHandle {
+    let handle: Arc<dyn ShapeHandleImpl> = handle;
+    ShapeHandle(handle)
+}
 
 const MAX_TRIS_PER_FRAME: u32 = 8000;
 const MAX_UNSUPPORTED_FILL_WARNINGS: u32 = 8;
@@ -326,7 +336,7 @@ impl ThreeDSBackend {
         s.diagnostics.total_tess_ms_fills = s.diagnostics.total_tess_ms_fills.saturating_add(elapsed_ms);
         s.diagnostics.total_tess_ms_strokes = s.diagnostics.total_tess_ms_strokes.saturating_add(0);
         s.diagnostics.max_tess_ms_single_shape = s.diagnostics.max_tess_ms_single_shape.max(elapsed_ms);
-        ShapeHandle(Arc::clone(handle_impl))
+        shape_handle_from_impl(Arc::clone(handle_impl))
     }
 
 
@@ -577,7 +587,7 @@ impl RenderBackend for ThreeDSBackend {
 
             let mut s = self.shared.lock().unwrap();
             s.diagnostics.shapes_registered = s.diagnostics.shapes_registered.saturating_add(1);
-            ShapeHandle(handle_impl)
+            shape_handle_from_impl(handle_impl)
         } else {
             // Step 2A: tessellate fills once at registration time and cache the meshes.
             //
@@ -616,7 +626,7 @@ impl RenderBackend for ThreeDSBackend {
             if elapsed_ms > SHAPE_WATCHDOG_MS {
                 return self.shape_timeout_fallback(key, id, bounds, elapsed_ms, "post_fills", &handle_impl);
             }
-            let skip_strokes = shape.line_styles.is_empty();
+            let skip_strokes = !shape.paths.iter().any(|path| matches!(path, DrawPath::Stroke { .. }));
             let (strokes, stroke_failed, stroke_partial, strokes_ms) = if skip_strokes {
                 (Vec::new(), false, false, 0)
             } else {
@@ -639,20 +649,23 @@ impl RenderBackend for ThreeDSBackend {
             }
 
             let (fill_count, stroke_count, fill_tris, stroke_tris) = if runlog::is_verbose() {
-                let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum();
+                let fill_tris: u32 = fills.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum::<u32>();
                 let stroke_tris: u32 = if skip_strokes {
                     0
                 } else {
-                    strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum()
+                    strokes.iter().map(|mesh| (mesh.indices.len() as u32) / 3).sum::<u32>()
                 };
-                (
-                    Some(fills.len()),
-                    Some(strokes.len()),
-                    Some(fill_tris),
-                    Some(stroke_tris),
-                )
+                let fill_count: Option<u32> = Some(fills.len() as u32);
+                let stroke_count: Option<u32> = Some(strokes.len() as u32);
+                let fill_tris: Option<u32> = Some(fill_tris);
+                let stroke_tris: Option<u32> = Some(stroke_tris);
+                (fill_count, stroke_count, fill_tris, stroke_tris)
             } else {
-                (None, None, None, None)
+                let fill_count: Option<u32> = None;
+                let stroke_count: Option<u32> = None;
+                let fill_tris: Option<u32> = None;
+                let stroke_tris: Option<u32> = None;
+                (fill_count, stroke_count, fill_tris, stroke_tris)
             };
 
             self.caches.shapes.lock().unwrap().insert_meshes(
@@ -738,7 +751,7 @@ impl RenderBackend for ThreeDSBackend {
                 .diagnostics
                 .total_unsupported_fill_paints
                 .saturating_add(unsupported_fill_paints);
-            ShapeHandle(handle_impl)
+            shape_handle_from_impl(handle_impl)
         }
     }
 
@@ -1212,11 +1225,16 @@ fn trim_to(s: &str, n: usize) -> &str {
     &s[..n]
 }
 
+#[cfg(feature = "net")]
 unsafe fn dummy_waker_clone(_: *const ()) -> RawWaker { dummy_waker() }
+#[cfg(feature = "net")]
 unsafe fn dummy_waker_wake(_: *const ()) {}
+#[cfg(feature = "net")]
 unsafe fn dummy_waker_wake_by_ref(_: *const ()) {}
+#[cfg(feature = "net")]
 unsafe fn dummy_waker_drop(_: *const ()) {}
 
+#[cfg(feature = "net")]
 const VTABLE: RawWakerVTable = RawWakerVTable::new(
     dummy_waker_clone,
     dummy_waker_wake,
@@ -1224,6 +1242,7 @@ const VTABLE: RawWakerVTable = RawWakerVTable::new(
     dummy_waker_drop,
 );
 
+#[cfg(feature = "net")]
 fn dummy_waker() -> RawWaker {
     RawWaker::new(std::ptr::null(), &VTABLE)
 }
