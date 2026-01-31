@@ -1,3 +1,4 @@
+#[cfg(feature = "legacy_sw_render")]
 pub mod fb3ds;
 
 use crate::render::frame::{ClearColor, ColorTransform, Matrix2D, RectI, TexVertex};

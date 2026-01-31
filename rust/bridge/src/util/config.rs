@@ -29,31 +29,37 @@ pub fn masks_enabled() -> bool {
 }
 
 fn read_config() -> RenderConfig {
+    #[cfg(feature = "storage")]
     let mut cfg = RenderConfig::default();
-    let text = match std::fs::read_to_string(CONFIG_PATH) {
-        Ok(text) => text,
-        Err(_) => return cfg,
-    };
+    #[cfg(not(feature = "storage"))]
+    let cfg = RenderConfig::default();
+    #[cfg(feature = "storage")]
+    {
+        let text = match std::fs::read_to_string(CONFIG_PATH) {
+            Ok(text) => text,
+            Err(_) => return cfg,
+        };
 
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut parts = line.splitn(2, '=');
-        let key = parts.next().unwrap_or("").trim();
-        let value = parts.next().unwrap_or("").trim();
-        if key.eq_ignore_ascii_case("textured_bitmaps") {
-            cfg.textured_bitmaps = matches!(
-                value,
-                "1" | "true" | "TRUE" | "on" | "ON" | "yes" | "YES"
-            );
-        }
-        if key.eq_ignore_ascii_case("masks_enabled") {
-            cfg.masks_enabled = matches!(
-                value,
-                "1" | "true" | "TRUE" | "on" | "ON" | "yes" | "YES"
-            );
+        for raw_line in text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(2, '=');
+            let key = parts.next().unwrap_or("").trim();
+            let value = parts.next().unwrap_or("").trim();
+            if key.eq_ignore_ascii_case("textured_bitmaps") {
+                cfg.textured_bitmaps = matches!(
+                    value,
+                    "1" | "true" | "TRUE" | "on" | "ON" | "yes" | "YES"
+                );
+            }
+            if key.eq_ignore_ascii_case("masks_enabled") {
+                cfg.masks_enabled = matches!(
+                    value,
+                    "1" | "true" | "TRUE" | "on" | "ON" | "yes" | "YES"
+                );
+            }
         }
     }
 
